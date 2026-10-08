@@ -10,7 +10,7 @@ import uuid
 import asyncio
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Depends
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
@@ -28,6 +28,8 @@ sys.path.insert(0, str(project_root))
 from agent.main_agent import run_deep_agent
 from agent.registry import registry
 from api.monitor import manager
+from api.auth import create_access_token, get_current_user
+from db.session_store import create_session
 
 app = FastAPI(title="DeepAgents API")
 
@@ -79,8 +81,14 @@ async def startup_event():
     print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
 
 
+@app.post("/api/login")
+async def login(user_id: str):
+    """登录接口：真实项目要校验用户名密码，这里先发 token 跑通链路（M1）。"""
+    return {"token": create_access_token(user_id)}
+
+
 @app.post("/api/task")
-async def run_task(request: TaskRequest):
+async def run_task(request: TaskRequest, user_id: str = Depends(get_current_user)):
     # 1. [ID 初始化]
     thread_id = request.thread_id or str(uuid.uuid4())
 
@@ -88,8 +96,11 @@ async def run_task(request: TaskRequest):
     # 用注册表启动，任务从此可查询、可取消、可观测（不再「发出去就不管」）
     registry.start(thread_id, run_deep_agent(request.query, thread_id))
 
+    # 2.5 [会话持久化] M1: 写入 sessions 表（status=pending）
+    create_session(thread_id, user_id)
+
     # 3. [立即响应]
-    return {"status": "started", "thread_id": thread_id}
+    return {"status": "started", "thread_id": thread_id, "user_id": user_id}
 
 
 @app.post("/api/task/{thread_id}/cancel")
