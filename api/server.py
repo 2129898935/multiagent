@@ -26,6 +26,7 @@ sys.path.insert(0, str(project_root))
 # Import agent runner and monitor
 # 注意：agent.main_agent 导入时会初始化 main_agent，这可能需要几秒钟
 from agent.main_agent import run_deep_agent
+from agent.registry import registry
 from api.monitor import manager
 
 app = FastAPI(title="DeepAgents API")
@@ -84,11 +85,18 @@ async def run_task(request: TaskRequest):
     thread_id = request.thread_id or str(uuid.uuid4())
 
     # 2. [后台执行] 异步运行 Agent，不阻塞主线程
-    # 注意：这里简单的使用 asyncio.create_task 触发，由 main_agent 内部负责实时推送
-    asyncio.create_task(run_deep_agent(request.query, thread_id))
+    # 用注册表启动，任务从此可查询、可取消、可观测（不再「发出去就不管」）
+    registry.start(thread_id, run_deep_agent(request.query, thread_id))
 
     # 3. [立即响应]
     return {"status": "started", "thread_id": thread_id}
+
+
+@app.post("/api/task/{thread_id}/cancel")
+async def cancel_task(thread_id: str):
+    """取消指定会话的后台任务（M0：任务注册表配套接口）。"""
+    ok = registry.cancel(thread_id)
+    return {"status": "cancelled" if ok else "not_found"}
 
 
 @app.post("/api/upload")

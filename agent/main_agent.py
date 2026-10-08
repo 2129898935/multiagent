@@ -28,6 +28,49 @@ from langchain_core.messages import AIMessage
 checkpoint_db_path = Path(__file__).parents[1] / "data" / "checkpoints.db"
 checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
 
+
+# ---- M0: Agent 单例化 ----
+# 整个进程只构建一次 LangGraph 图、只开一次 checkpointer 连接。
+# 图本身是无状态的，会话状态在 checkpointer 里，靠 config["configurable"]["thread_id"]
+# 隔离不同会话，所以「重的图共享一份、轻的状态按会话隔离」，不需要每次请求重建 Agent。
+_agent = None
+_checkpointer = None
+_checkpointer_cm = None  # 保留异步上下文管理器引用，便于进程结束时优雅关闭连接（对齐 M10）
+_agent_lock = asyncio.Lock()
+
+
+async def get_agent():
+    """懒加载单例：整个进程只构建一次 Agent 图 + checkpointer 连接。"""
+    global _agent, _checkpointer, _checkpointer_cm
+    if _agent is not None:
+        return _agent
+
+    async with _agent_lock:
+        # 双重检查：拿到锁后可能已被并发的首个请求构建过
+        if _agent is not None:
+            return _agent
+
+        # AsyncSqliteSaver.from_conn_string 是 @asynccontextmanager，调用返回的是「异步
+        # 上下文管理器」，而不是 saver 本身。手动 __aenter__ 一次让底层 SQLite 连接常驻到
+        # 进程结束，拿到真正的 AsyncSqliteSaver 实例复用。
+        _checkpointer_cm = AsyncSqliteSaver.from_conn_string(str(checkpoint_db_path))
+        _checkpointer = await _checkpointer_cm.__aenter__()
+
+        _agent = create_deep_agent(
+            model=model,
+            system_prompt=main_agent_content["system_prompt"],
+            tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+            checkpointer=_checkpointer,
+            subagents=[
+                database_query_agent,
+                network_search_agent,
+                knowledge_base_agent,
+            ],
+        )
+        print("[Agent] create_deep_agent 已构建（单例，只应出现一次）")
+        return _agent
+
+
 # 执行
 """
   1. 执行主智能体 一定选异步，原因：对应多个客户端
@@ -110,58 +153,47 @@ async def run_deep_agent(task_query, session_id):
     """
     # 反馈结果
     try:
-        # 在异步上下文中创建 checkpointer 和 main_agent
-        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db_path)) as checkpointer:
-            main_agent = create_deep_agent(
-                model=model,
-                system_prompt=main_agent_content['system_prompt'],
-                tools=[generate_markdown, convert_md_to_pdf, read_file_content],
-                checkpointer=checkpointer,
-                subagents=[
-                    database_query_agent,
-                    network_search_agent,
-                    knowledge_base_agent
-                ]
-            )
+        # 复用单例 Agent（整个进程只构建一次，会话隔离靠 thread_id）
+        main_agent = await get_agent()
 
-            # 执行
-            async for chunk in main_agent.astream({
-                "messages": [
-                    {
-                        "role": "user", "content": task_query + path_instruction
-                    }
-                ]
-            }, config=config):
-                # {"model [大模型决定调用工具 子智能体  最终结果] / tools" : {messages:[xxx...]}}
-                for node_name, state in chunk.items():
-                    if not state or "messages" not in state:
-                        continue
-                    messages = state["messages"]
-                    if messages and isinstance(messages, list):
-                        last_msg = messages[-1]
-                        if node_name == 'model':
-                            if last_msg.tool_calls:
-                                # 工具和子智能体
-                                for tool_call in last_msg.tool_calls:
-                                    """
-                                      tool_call = {
-                                          name: task
-                                          args:{
-                                              subagent_type:子智能体的名字
-                                              description:子智能体的描述
-                                          }
+        # 执行
+        async for chunk in main_agent.astream({
+            "messages": [
+                {
+                    "role": "user", "content": task_query + path_instruction
+                }
+            ]
+        }, config=config):
+            # {"model [大模型决定调用工具 子智能体  最终结果] / tools" : {messages:[xxx...]}}
+            for node_name, state in chunk.items():
+                if not state or "messages" not in state:
+                    continue
+                messages = state["messages"]
+                if messages and isinstance(messages, list):
+                    last_msg = messages[-1]
+                    if node_name == 'model':
+                        if last_msg.tool_calls:
+                            # 工具和子智能体
+                            for tool_call in last_msg.tool_calls:
+                                """
+                                  tool_call = {
+                                      name: task
+                                      args:{
+                                          subagent_type:子智能体的名字
+                                          description:子智能体的描述
                                       }
-                                    """
-                                    if tool_call['name'] == 'task':
-                                        # 调用某个子智能体
-                                        monitor.report_assistant(
-                                            tool_call['args']['subagent_type'],
-                                            {'description': tool_call['args']['description']}
-                                        )
-                            elif last_msg.content:
-                                # 最终结果
-                                print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
-                                monitor.report_task_result(last_msg.content)
+                                  }
+                                """
+                                if tool_call['name'] == 'task':
+                                    # 调用某个子智能体
+                                    monitor.report_assistant(
+                                        tool_call['args']['subagent_type'],
+                                        {'description': tool_call['args']['description']}
+                                    )
+                        elif last_msg.content:
+                            # 最终结果
+                            print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
+                            monitor.report_task_result(last_msg.content)
 
     except Exception as e:
         # 报错推送错误信息给前端
