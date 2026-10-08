@@ -1,0 +1,35 @@
+"""GitHub Advisory 数据源工具（对齐 M11）：查询 GHSA 通告详情。
+
+OSV 返回的 aliases 里含 GHSA-ID，可用本工具补充 GitHub Advisory 的详情。
+"""
+import json
+
+import httpx
+from langchain_core.tools import tool
+
+ADVISORY_URL = "https://api.github.com/advisories"
+
+
+@tool
+def query_advisory(ghsa_id: str) -> str:
+    """查询 GitHub Advisory 上指定 GHSA 的通告详情（严重度/摘要/发布时间）。"""
+    try:
+        resp = httpx.get(
+            f"{ADVISORY_URL}/{ghsa_id}",
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        a = resp.json()
+        return json.dumps(
+            {
+                "ghsa_id": a.get("ghsa_id"),
+                "severity": a.get("severity"),
+                "summary": a.get("summary"),
+                "published_at": a.get("published_at"),
+                "cvss_score": a.get("cvss", {}).get("score"),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return f"GitHub Advisory 查询失败：{e}"
