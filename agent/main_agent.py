@@ -205,8 +205,8 @@ async def run_deep_agent(task_query, session_id):
                                         {'description': tool_call['args']['description']}
                                     )
                                 else:
-                                    # M7: 观察工具调用，检测假推进/死循环
-                                    detector.observe(tool_call['name'], tool_call.get('args', {}), "")
+                                    # M7: 观察工具调用，检测假推进/死循环（只按「同工具同参数」判定）
+                                    detector.observe(tool_call['name'], tool_call.get('args', {}))
                                     if detector.is_stuck():
                                         monitor._emit("error", "检测到任务可能陷入无进展循环（重复调用同一工具）")
                         elif last_msg.content:

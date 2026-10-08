@@ -13,15 +13,20 @@ import hashlib
 class ProgressDetector:
     def __init__(self, max_repeats: int = 3) -> None:
         self.max_repeats = max_repeats
-        self._history: list[tuple[str, str, str]] = []  # [(tool_name, args_hash, result_hash)]
+        self._history: list[tuple[str, str, str | None]] = []  # [(tool_name, args_hash, result_hash)]
 
     @staticmethod
     def _hash(obj) -> str:
         return hashlib.md5(str(obj).encode("utf-8")).hexdigest()
 
-    def observe(self, tool_name: str, args: dict, result: str) -> None:
-        """记录一次工具调用，只保留最近 20 条。"""
-        entry = (tool_name, self._hash(args), self._hash(str(result)[:500]))
+    def observe(self, tool_name: str, args: dict, result: str | None = None) -> None:
+        """记录一次工具调用，只保留最近 20 条。
+
+        result 为 None 表示「结果尚未拿到」（如只在 tool_call 阶段观测），
+        此时该条只参与「同工具同参数」检测，不参与「结果相似度」检测。
+        """
+        result_hash = self._hash(str(result)[:500]) if result is not None else None
+        entry = (tool_name, self._hash(args), result_hash)
         self._history.append(entry)
         self._history = self._history[-20:]
 
@@ -33,7 +38,8 @@ class ProgressDetector:
         # 信号一：同工具 + 同参数，连续重复
         if len({(n, a) for (n, a, _) in recent}) == 1:
             return True
-        # 信号二：结果连续完全相同（在打转）
-        if len({r for (_, _, r) in recent}) == 1:
-            return True
+        # 信号二：结果连续完全相同（仅当最近几次都拿到了真实结果时才判定）
+        if all(r is not None for (_, _, r) in recent):
+            if len({r for (_, _, r) in recent}) == 1:
+                return True
         return False

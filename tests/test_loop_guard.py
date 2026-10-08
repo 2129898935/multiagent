@@ -29,3 +29,19 @@ def test_below_threshold_not_stuck():
     d.observe("internet_search", {"query": "a"}, "结果")
     d.observe("internet_search", {"query": "a"}, "结果")
     assert d.is_stuck() is False  # 只有 2 次，未到阈值
+
+
+def test_different_tools_without_result_not_false_positive():
+    """接线场景：只传 tool_name+args（无结果），不同工具不应误判卡住。"""
+    d = ProgressDetector(max_repeats=3)
+    d.observe("internet_search", {"query": "a"})
+    d.observe("list_sql_tables", {})
+    d.observe("get_table_data", {"table_name": "orders"})
+    assert d.is_stuck() is False  # 三个不同工具，无结果，不应误报
+
+
+def test_same_tool_same_args_without_result_stuck():
+    d = ProgressDetector(max_repeats=3)
+    for _ in range(3):
+        d.observe("internet_search", {"query": "房价"})
+    assert d.is_stuck() is True  # 同工具同参数，即使无结果也应判卡住
