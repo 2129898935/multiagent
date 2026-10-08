@@ -23,3 +23,12 @@ def test_session_lifecycle(monkeypatch, tmp_path):
 def test_get_missing_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(ss, "_db_path", tmp_path / "sessions.db")
     assert ss.get_session("nope") is None
+
+
+def test_title_saved_and_listed(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "_db_path", tmp_path / "sessions.db")
+    ss.create_session("t1", "alice", title="分析销售趋势")
+    ss.create_session("t2", "bob", title="查询依赖漏洞")
+    by_id = {s["id"]: s for s in ss.list_sessions()}
+    assert by_id["t1"]["title"] == "分析销售趋势"
+    assert by_id["t2"]["title"] == "查询依赖漏洞"

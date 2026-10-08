@@ -29,7 +29,7 @@ from agent.main_agent import run_deep_agent
 from agent.registry import registry
 from api.monitor import manager
 from api.auth import create_access_token, get_current_user
-from db.session_store import create_session
+from db.session_store import create_session, list_sessions
 
 app = FastAPI(title="DeepAgents API")
 
@@ -87,6 +87,12 @@ async def login(user_id: str):
     return {"token": create_access_token(user_id)}
 
 
+def _make_title(query: str, max_len: int = 30) -> str:
+    """从提问生成会话标题（去换行、截断），用于人可读地识别会话。"""
+    q = " ".join(query.split())
+    return q[:max_len] + ("…" if len(q) > max_len else "")
+
+
 @app.post("/api/task")
 async def run_task(request: TaskRequest, user_id: str = Depends(get_current_user)):
     # 1. [ID 初始化]
@@ -96,8 +102,8 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_current_user
     # 用注册表启动，任务从此可查询、可取消、可观测（不再「发出去就不管」）
     registry.start(thread_id, run_deep_agent(request.query, thread_id))
 
-    # 2.5 [会话持久化] M1: 写入 sessions 表（status=pending）
-    create_session(thread_id, user_id)
+    # 2.5 [会话持久化] M1: 写入 sessions 表（status=pending，title 用提问截断生成）
+    create_session(thread_id, user_id, title=_make_title(request.query))
 
     # 3. [立即响应]
     return {"status": "started", "thread_id": thread_id, "user_id": user_id}
@@ -108,6 +114,12 @@ async def cancel_task(thread_id: str):
     """取消指定会话的后台任务（M0：任务注册表配套接口）。"""
     ok = registry.cancel(thread_id)
     return {"status": "cancelled" if ok else "not_found"}
+
+
+@app.get("/api/sessions")
+async def get_sessions():
+    """返回会话列表（含标题），供前端做「标题 → thread_id」映射。"""
+    return {"sessions": list_sessions()}
 
 
 @app.post("/api/upload")

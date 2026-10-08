@@ -9,6 +9,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    title TEXT,
     repo_url TEXT,
     status TEXT DEFAULT 'pending',   -- pending/running/done/failed
     created_at TEXT,
@@ -24,17 +25,21 @@ def _conn() -> sqlite3.Connection:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_db_path))
     conn.execute(_SCHEMA)
+    # 轻量迁移：老库可能没有 title 列
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+    if "title" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
     return conn
 
 
-def create_session(thread_id: str, user_id: str, repo_url: str | None = None) -> None:
+def create_session(thread_id: str, user_id: str, repo_url: str | None = None, title: str | None = None) -> None:
     """任务开始时写入 pending 记录。"""
     conn = _conn()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO sessions (id, user_id, repo_url, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            (thread_id, user_id, repo_url, datetime.now().isoformat()),
+            "INSERT OR REPLACE INTO sessions (id, user_id, title, repo_url, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (thread_id, user_id, title, repo_url, datetime.now().isoformat()),
         )
         conn.commit()
     finally:
@@ -64,5 +69,16 @@ def get_session(thread_id: str):
             return None
         cols = [d[0] for d in conn.execute("SELECT * FROM sessions LIMIT 0").description]
         return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def list_sessions() -> list[dict]:
+    """返回所有会话（按创建时间倒序），供前端做「标题 → thread_id」映射。"""
+    conn = _conn()
+    try:
+        cols = [d[0] for d in conn.execute("SELECT * FROM sessions LIMIT 0").description]
+        rows = conn.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()
+        return [dict(zip(cols, r)) for r in rows]
     finally:
         conn.close()

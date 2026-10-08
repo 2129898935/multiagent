@@ -585,6 +585,14 @@ function scheduleFileRefresh() { if (fileTimer) clearTimeout(fileTimer); fileTim
 async function refreshFiles() {
   const el = $('#fileList');
   try {
+    // 拉取会话标题映射（thread_id → title），用于把 session_{uuid} 显示成可读标题
+    const titleMap = {};
+    try {
+      const sr = await fetch('/api/sessions');
+      const sd = await sr.json();
+      (sd.sessions || []).forEach(s => { if (s.title) titleMap[s.id] = s.title; });
+    } catch (_) {}
+
     const res = await fetch('/api/files');
     const d = await res.json();
     if (d.error || !d.files || !d.files.length) {
@@ -601,17 +609,19 @@ async function refreshFiles() {
     });
     const cur = activeId ? `session_${activeId}` : null;
     const sorted = Object.entries(groups).sort((a,b) => (a[0]===cur?-1:b[0]===cur?1:b[0].localeCompare(a[0])));
-    el.innerHTML = sorted.map(([g, fs]) =>
-      `<div style="font-size:10px;color:var(--text-faint);padding:8px 8px 3px;letter-spacing:.4px;">${g === cur ? '▸ ' : ''}${escapeHtml(g)}</div>` +
-      fs.map(f => `<div class="file-item">
-        <span class="file-icon">${iconForFile(f.name)}</span>
-        <div style="flex:1;min-width:0;">
-          <div class="file-name" title="${escapeAttr(f.name)}">${escapeHtml(f.name)}</div>
-          <div class="file-meta">${fmtSize(f.size)}</div>
-        </div>
-        <span class="file-dl" onclick="downloadFile('${encodeURIComponent(f.path)}')" title="下载">⬇</span>
-      </div>`).join('')
-    ).join('');
+    el.innerHTML = sorted.map(([g, fs]) => {
+      const threadId = g.replace(/^session_/, '');
+      const label = titleMap[threadId] || g;  // 有标题用标题，否则回退到文件夹名
+      return `<div style="font-size:10px;color:var(--text-faint);padding:8px 8px 3px;letter-spacing:.4px;">${g === cur ? '▸ ' : ''}${escapeHtml(label)}</div>` +
+        fs.map(f => `<div class="file-item">
+          <span class="file-icon">${iconForFile(f.name)}</span>
+          <div style="flex:1;min-width:0;">
+            <div class="file-name" title="${escapeAttr(f.name)}">${escapeHtml(f.name)}</div>
+            <div class="file-meta">${fmtSize(f.size)}</div>
+          </div>
+          <span class="file-dl" onclick="downloadFile('${encodeURIComponent(f.path)}')" title="下载">⬇</span>
+        </div>`).join('');
+    }).join('');
   } catch (_) {}
 }
 

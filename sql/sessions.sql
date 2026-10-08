@@ -6,6 +6,7 @@
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,            -- thread_id
     user_id TEXT NOT NULL,
+    title TEXT,                     -- 人类可读标题（来自第一句提问）
     repo_url TEXT,
     status TEXT DEFAULT 'pending',  -- pending/running/done/failed
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
