@@ -1,17 +1,30 @@
 """GitHub 仓库工具（对齐 M11）：查询仓库维护性信号。"""
 import json
+import os
 
 import httpx
+from dotenv import find_dotenv, load_dotenv
 from langchain_core.tools import tool
 
+load_dotenv(find_dotenv())
+
 GITHUB_API = "https://api.github.com"
+
+
+def _headers() -> dict:
+    """构造请求头，带 GH_TOKEN 时自动加 Authorization 避免限流。"""
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 @tool
 def query_repo_health(owner: str, repo: str) -> str:
     """查询 GitHub 仓库的维护性信号（star / open issues / 最后推送时间 / 是否归档）。"""
     try:
-        resp = httpx.get(f"{GITHUB_API}/repos/{owner}/{repo}", timeout=10)
+        resp = httpx.get(f"{GITHUB_API}/repos/{owner}/{repo}", headers=_headers(), timeout=10)
         resp.raise_for_status()
         d = resp.json()
         return json.dumps(

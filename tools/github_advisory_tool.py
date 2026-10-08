@@ -3,11 +3,24 @@
 OSV 返回的 aliases 里含 GHSA-ID，可用本工具补充 GitHub Advisory 的详情。
 """
 import json
+import os
 
 import httpx
+from dotenv import find_dotenv, load_dotenv
 from langchain_core.tools import tool
 
+load_dotenv(find_dotenv())
+
 ADVISORY_URL = "https://api.github.com/advisories"
+
+
+def _headers() -> dict:
+    """构造请求头，带 GH_TOKEN 时自动加 Authorization 避免限流。"""
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 @tool
@@ -16,7 +29,7 @@ def query_advisory(ghsa_id: str) -> str:
     try:
         resp = httpx.get(
             f"{ADVISORY_URL}/{ghsa_id}",
-            headers={"Accept": "application/vnd.github+json"},
+            headers=_headers(),
             timeout=10,
         )
         resp.raise_for_status()
