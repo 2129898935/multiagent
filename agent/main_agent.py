@@ -1,12 +1,14 @@
 from agent.subagents.knowledge_base_agent import knowledge_base_agent
 from agent.subagents.database_query_agent import database_query_agent
 from agent.subagents.network_search_agent import network_search_agent
+from agent.subagents.vulnerability_agent import vulnerability_agent
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 # main_agent tool导入
 from tools.markdown_tools import generate_markdown
 from tools.pdf_tools import convert_md_to_pdf
 from tools.upload_file_read_tool import read_file_content
+from tools.osv_tool import query_osv_vulns
 
 from deepagents import create_deep_agent
 
@@ -20,6 +22,10 @@ import shutil
 from pathlib import Path
 
 from api.context import set_session_context, reset_session_context, set_thread_context
+
+from agent.loop_guard import ProgressDetector
+from utils.context_budget import truncate_text
+from db.session_store import update_session_status
 
 from langchain_core.messages import AIMessage
 
@@ -59,12 +65,13 @@ async def get_agent():
         _agent = create_deep_agent(
             model=model,
             system_prompt=main_agent_content["system_prompt"],
-            tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+            tools=[generate_markdown, convert_md_to_pdf, read_file_content, query_osv_vulns],
             checkpointer=_checkpointer,
             subagents=[
                 database_query_agent,
                 network_search_agent,
                 knowledge_base_agent,
+                vulnerability_agent,
             ],
         )
         print("[Agent] create_deep_agent 已构建（单例，只应出现一次）")
@@ -151,16 +158,23 @@ async def run_deep_agent(task_query, session_id):
     3. 使用相对路径，禁止使用绝对路径
     4. 若存在上传文件，请先分析内容
     """
+    # M2: Context 预算——输入过长时截断，防止超大输入打爆上下文
+    user_content = truncate_text(task_query + path_instruction, max_tokens=8000)
+
+    # M7: 死循环防护——进度检测器，识别「同工具同参数重复」的假推进
+    detector = ProgressDetector()
+
     # 反馈结果
     try:
         # 复用单例 Agent（整个进程只构建一次，会话隔离靠 thread_id）
         main_agent = await get_agent()
+        update_session_status(session_id, "running")  # M1: 会话状态 → running
 
         # 执行
         async for chunk in main_agent.astream({
             "messages": [
                 {
-                    "role": "user", "content": task_query + path_instruction
+                    "role": "user", "content": user_content
                 }
             ]
         }, config=config):
@@ -190,14 +204,22 @@ async def run_deep_agent(task_query, session_id):
                                         tool_call['args']['subagent_type'],
                                         {'description': tool_call['args']['description']}
                                     )
+                                else:
+                                    # M7: 观察工具调用，检测假推进/死循环
+                                    detector.observe(tool_call['name'], tool_call.get('args', {}), "")
+                                    if detector.is_stuck():
+                                        monitor._emit("error", "检测到任务可能陷入无进展循环（重复调用同一工具）")
                         elif last_msg.content:
                             # 最终结果
                             print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
                             monitor.report_task_result(last_msg.content)
 
+        update_session_status(session_id, "done")  # M1: 会话状态 → done
+
     except Exception as e:
         # 报错推送错误信息给前端
         monitor._emit("error", f"执行主智能发生异常信息：{str(e)}")
+        update_session_status(session_id, "failed", str(e))  # M1: 会话状态 → failed
     finally:
         # 释放存储的地址和session_id
         reset_session_context(session_dir_token, session_id_token)
