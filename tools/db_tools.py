@@ -4,6 +4,9 @@ from api.monitor import monitor
 from mysql.connector import connect, Error
 from langchain_core.tools import tool
 
+from utils.errors import ToolError, ErrorCategory
+from tools.sql_guard import is_read_only_sql, add_limit
+
 load_dotenv()
 
 
@@ -68,7 +71,13 @@ def list_sql_tables()->str:
                 table_names = [table[0] for table in tables]
                 return f"可用的表有：{', '.join(table_names)}"
     except Error as e:
-        return f"查询出现异常：{str(e)}"
+        # 返回结构化失败结果回填给模型，让模型知道查询失败、不再反复重试
+        return ToolError(
+            category=ErrorCategory.FATAL,
+            message=f"数据库查询失败：{e}",
+            retryable=False,
+            suggestion="请检查数据库连接或 SQL 语句",
+        ).to_result_str()
 
 
 @tool
@@ -134,7 +143,13 @@ def get_table_data(table_name)->str:
                 data_str = "\n".join(results)
                 return f"{header_str}\n{data_str}"
     except Error as e:
-        return f"查询出现异常：{str(e)}"
+        # 返回结构化失败结果回填给模型，让模型知道查询失败、不再反复重试
+        return ToolError(
+            category=ErrorCategory.FATAL,
+            message=f"数据库查询失败：{e}",
+            retryable=False,
+            suggestion="请检查数据库连接或 SQL 语句",
+        ).to_result_str()
 
 
 @tool
@@ -157,6 +172,17 @@ def execute_sql_query(query)->str:
     """
     # 埋点,调用工具了告诉前端哪个工具被调用了！！
     monitor.report_tool(tool_name="数据库表数据查询工具：execute_sql_query", args={"query":query})
+
+    # M5: SQL 只读护栏——无论模型怎么写，都只放行只读查询，并强制加 LIMIT
+    if not is_read_only_sql(query):
+        # 返回结构化拒绝结果回填给模型，让模型知道「操作被拒」，从而纠正话术
+        return ToolError(
+            category=ErrorCategory.PERMISSION_DENIED,
+            message="操作被拒绝：只允许执行只读查询（SELECT/SHOW/DESCRIBE/EXPLAIN）",
+            retryable=False,
+            suggestion="请改用只读查询",
+        ).to_result_str()
+    query = add_limit(query)
 
     # 获取数据库参数
     config = get_db_config()
@@ -199,7 +225,13 @@ def execute_sql_query(query)->str:
                 data_str = "\n".join(results)
                 return f"{header_str}\n{data_str}"
     except Error as e:
-        return f"查询出现异常：{str(e)}"
+        # 返回结构化失败结果回填给模型，让模型知道查询失败、不再反复重试
+        return ToolError(
+            category=ErrorCategory.FATAL,
+            message=f"数据库查询失败：{e}",
+            retryable=False,
+            suggestion="请检查数据库连接或 SQL 语句",
+        ).to_result_str()
 
 
 

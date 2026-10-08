@@ -51,6 +51,9 @@ def retry_with_backoff(
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
+                    # 不可重试的错误（参数错/越权/致命）直接抛出，不进重试
+                    if hasattr(e, "retryable") and not e.retryable:
+                        raise
                     last_exception = e
                     if attempt < max_retries:
                         # 打印重试信息（生产环境可改为 logging.warning）
