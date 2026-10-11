@@ -9,6 +9,7 @@ from tools.markdown_tools import generate_markdown
 from tools.pdf_tools import convert_md_to_pdf
 from tools.upload_file_read_tool import read_file_content
 from tools.osv_tool import query_osv_vulns
+from tools.github_repo_tool import query_repo_health
 
 from deepagents import create_deep_agent
 
@@ -65,7 +66,7 @@ async def get_agent():
         _agent = create_deep_agent(
             model=model,
             system_prompt=main_agent_content["system_prompt"],
-            tools=[generate_markdown, convert_md_to_pdf, read_file_content, query_osv_vulns],
+            tools=[generate_markdown, convert_md_to_pdf, read_file_content, query_osv_vulns, query_repo_health],
             checkpointer=_checkpointer,
             subagents=[
                 database_query_agent,

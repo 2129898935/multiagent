@@ -12,6 +12,9 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from langchain_core.tools import tool
 
+from api.context import get_session_context
+from utils.path_utils import resolve_path
+
 load_dotenv(find_dotenv())
 
 
@@ -27,8 +30,11 @@ def _find_osv_scanner() -> str:
 def scan_repo_with_osv_scanner(path: str) -> str:
     """调用本地 osv-scanner 扫描指定目录，返回 JSON 结果（用于基准交叉验证）。"""
     try:
+        # 相对路径解析到会话目录，与其它文件工具保持一致
+        session_dir = get_session_context()
+        resolved = resolve_path(path, session_dir) if session_dir else path
         r = subprocess.run(
-            [_find_osv_scanner(), "--format", "json", "-r", path],
+            [_find_osv_scanner(), "--format", "json", "-r", resolved],
             capture_output=True,
             text=True,
             timeout=120,
