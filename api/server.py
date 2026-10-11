@@ -100,7 +100,7 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_current_user
 
     # 2. [后台执行] 异步运行 Agent，不阻塞主线程
     # 用注册表启动，任务从此可查询、可取消、可观测（不再「发出去就不管」）
-    registry.start(thread_id, run_deep_agent(request.query, thread_id))
+    registry.start(thread_id, run_deep_agent(request.query, thread_id, user_id))
 
     # 2.5 [会话持久化] M1: 写入 sessions 表（status=pending，title 用提问截断生成）
     create_session(thread_id, user_id, title=_make_title(request.query))

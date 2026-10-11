@@ -27,6 +27,9 @@ from api.context import set_session_context, reset_session_context, set_thread_c
 from agent.loop_guard import ProgressDetector
 from utils.context_budget import truncate_text
 from db.session_store import update_session_status
+from memory.retrieve import retrieve_memories
+from memory.extract import extract_memories
+from memory.store import add_memory
 
 from langchain_core.messages import AIMessage
 
@@ -96,7 +99,7 @@ project_root_path = Path(__file__).parents[1].resolve()  # 绝对 解析路径�
 # main_agent.stream()
 # main_agent.astream() [选他]
 
-async def run_deep_agent(task_query, session_id):
+async def run_deep_agent(task_query, session_id, user_id=None):
     """
     定义流式+异步执行主智能体！！
     执行过程中，返回  会话文件化返回  调用子智能体  调用最终结果 （monitor）
@@ -159,8 +162,14 @@ async def run_deep_agent(task_query, session_id):
     3. 使用相对路径，禁止使用绝对路径
     4. 若存在上传文件，请先分析内容
     """
+    # M3: 召回用户长期记忆，注入用户消息（跨会话记忆）
+    memory_prompt = retrieve_memories(user_id) if user_id else ""
+
     # M2: Context 预算——输入过长时截断，防止超大输入打爆上下文
-    user_content = truncate_text(task_query + path_instruction, max_tokens=8000)
+    user_content = truncate_text(
+        task_query + ("\n\n" + memory_prompt if memory_prompt else "") + path_instruction,
+        max_tokens=8000,
+    )
 
     # M7: 死循环防护——进度检测器，识别「同工具同参数重复」的假推进
     detector = ProgressDetector()
@@ -170,6 +179,8 @@ async def run_deep_agent(task_query, session_id):
         # 复用单例 Agent（整个进程只构建一次，会话隔离靠 thread_id）
         main_agent = await get_agent()
         update_session_status(session_id, "running")  # M1: 会话状态 → running
+
+        final_result = ""  # 最终回答内容，供 M3 记忆提炼使用
 
         # 执行
         async for chunk in main_agent.astream({
@@ -214,6 +225,12 @@ async def run_deep_agent(task_query, session_id):
                             # 最终结果
                             print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
                             monitor.report_task_result(last_msg.content)
+                            final_result = last_msg.content
+
+        # M3: 任务结束后提炼长期记忆（跨会话有价值的信息）
+        if user_id and final_result:
+            for m in await extract_memories(task_query + "\n" + final_result, model):
+                add_memory(user_id, m["type"], m["content"])
 
         update_session_status(session_id, "done")  # M1: 会话状态 → done
 
