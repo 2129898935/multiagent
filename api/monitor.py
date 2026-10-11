@@ -108,6 +108,7 @@ class ToolMonitor:
     def report_tool(self, tool_name: str, args: Dict[str, Any] = None):
         """报告工具开始执行"""
         self._emit("tool_start", f"开始执行工具: {tool_name}", {"tool_name": tool_name, "args": args})
+        self._write_trace("tool", tool_name=tool_name, args=args, status="start")
 
     def report_assistant(self, assistant_name: str, args: Dict[str, Any] = None):
         """报告正在调用的子智能体进度"""
@@ -117,6 +118,22 @@ class ToolMonitor:
     def report_task_result(self, result: str):
         """报告任务最终结果"""
         self._emit("task_result", "任务执行完成", {"result": result})
+        self._write_trace("result", result_summary=result[:200], status="done")
+
+    def _write_trace(self, node: str, tool_name: str | None = None, args: Dict[str, Any] | None = None, result_summary: str = "", status: str = "ok"):
+        """M8: 把事件写入 traces 表（写入失败不影响主流程）。"""
+        try:
+            from db.trace_store import add_trace
+            add_trace(
+                thread_id=get_thread_context(),
+                node=node,
+                tool_name=tool_name,
+                args=args,
+                result_summary=result_summary,
+                status=status,
+            )
+        except Exception:
+            pass
 
     def report_session_dir(self, path: str):
         """报告任务工作目录"""

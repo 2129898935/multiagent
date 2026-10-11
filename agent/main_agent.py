@@ -82,6 +82,16 @@ async def get_agent():
         return _agent
 
 
+async def close_agent():
+    """优雅停机：关闭单例 checkpointer 连接（M10）。"""
+    global _agent, _checkpointer, _checkpointer_cm
+    if _checkpointer_cm is not None:
+        await _checkpointer_cm.__aexit__(None, None, None)
+        _checkpointer_cm = None
+        _checkpointer = None
+        _agent = None
+
+
 # 执行
 """
   1. 执行主智能体 一定选异步，原因：对应多个客户端

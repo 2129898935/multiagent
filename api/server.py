@@ -81,6 +81,15 @@ async def startup_event():
     print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """M10: 优雅停机——取消在途任务 + 关闭 checkpointer 连接。"""
+    registry.cancel_all()
+    from agent.main_agent import close_agent
+    await close_agent()
+    print("[Server] 优雅停机完成")
+
+
 @app.post("/api/login")
 async def login(user_id: str):
     """登录接口：真实项目要校验用户名密码，这里先发 token 跑通链路（M1）。"""

@@ -45,6 +45,11 @@ class TaskRegistry:
     def count(self) -> int:
         return len(self._tasks)
 
+    def cancel_all(self) -> None:
+        """取消所有在途任务（优雅停机用）。"""
+        for thread_id in list(self._tasks.keys()):
+            self.cancel(thread_id)
+
 
 # 模块级单例，server 直接 import 这个实例
 registry = TaskRegistry()

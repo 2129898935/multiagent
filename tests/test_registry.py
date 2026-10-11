@@ -46,3 +46,13 @@ async def test_cancel_unknown_returns_false():
     r = TaskRegistry()
     assert r.cancel("nope") is False
     assert r.is_running("nope") is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_all():
+    r = TaskRegistry()
+    r.start("t1", asyncio.sleep(10))
+    r.start("t2", asyncio.sleep(10))
+    assert r.count() == 2
+    r.cancel_all()
+    assert r.count() == 0
