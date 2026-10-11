@@ -509,7 +509,7 @@ function markError(id, msg) {
 }
 
 // ═══════════ 渲染 ═══════════
-function renderAll() { renderConvList(); renderChat(); refreshFiles(); updateConn(); }
+function renderAll() { renderConvList(); renderChat(); updateConn(); }
 
 function renderConvList() {
   const el = $('#convList');
@@ -777,9 +777,8 @@ $('#input').addEventListener('keydown', e => {
 (async function init() {
   await login('demo');
   renderAll();
-  refreshFiles();
-  setInterval(refreshFiles, 20000);   // 定期刷新文件列表
-  setInterval(updateConn, 3000);       // 定期刷新连接状态
+  refreshFiles();                      // 页面加载时拉取一次文件列表
+  setInterval(updateConn, 3000);       // 定期刷新连接状态（本地检查，无网络请求）
 })();
 </script>
 </body>
