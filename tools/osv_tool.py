@@ -134,3 +134,38 @@ def query_osv_vulns(
             else:
                 lines.append(f"  - {vid}")
     return "\n".join(lines) or "未发现已知漏洞"
+
+
+def query_osv_vuln_ids(
+    package_names: list[str],
+    ecosystem: str = "PyPI",
+    versions: list[str] | None = None,
+) -> dict[str, set[str]]:
+    """按包返回其所有漏洞的完整 ID 集合（主 ID + 别名），供评测/多源去重使用。
+
+    与 query_osv_vulns 的区别：不做截断、不做摘要，只返回可用于归一化对比的 ID 集合。
+    别名归一化是漏洞聚合的关键：GHSA / CVE / PYSEC / GO 可能指向同一个漏洞。
+    """
+    queries = []
+    for i, n in enumerate(package_names):
+        q = {"package": {"name": n, "ecosystem": ecosystem}}
+        if versions and i < len(versions) and versions[i]:
+            q["version"] = versions[i]
+        queries.append(q)
+
+    data = _query_osv({"queries": queries})
+    result: dict[str, set[str]] = {}
+    for i, name in enumerate(package_names):
+        res = data.get("results", [])[i] if i < len(data.get("results", [])) else {}
+        ids: set[str] = set()
+        for v in res.get("vulns", []):
+            vid = v.get("id", "")
+            if not vid:
+                continue
+            ids.add(vid)
+            try:
+                ids.update(_get_vuln_detail(vid).get("aliases", []))
+            except Exception:
+                pass
+        result[name] = ids
+    return result

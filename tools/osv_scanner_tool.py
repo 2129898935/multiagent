@@ -37,6 +37,8 @@ def scan_repo_with_osv_scanner(path: str) -> str:
             [_find_osv_scanner(), "--format", "json", "-r", resolved],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
         # osv-scanner 退出码：0=无漏洞，1=发现漏洞（两者 stdout 都是有效 JSON），其它为扫描错误
