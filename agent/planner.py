@@ -31,6 +31,20 @@ def default_scan_plan() -> Plan:
     )
 
 
+def tool_to_step_id(tool_name: str) -> str | None:
+    """把工具名映射到扫描计划的步骤 ID（用于接线时追踪进度）。"""
+    n = (tool_name or "").lower()
+    if any(k in n for k in ("parse", "requirements", "read_file", "上传")):
+        return "S1"
+    if any(k in n for k in ("osv", "advisory", "cvss", "vuln", "cve", "漏洞")):
+        return "S2"
+    if any(k in n for k in ("deps", "package_info", "license", "许可证", "维护")):
+        return "S3"
+    if any(k in n for k in ("sbom", "markdown", "pdf", "report", "报告")):
+        return "S5"
+    return None
+
+
 class PlanTracker:
     """追踪计划进度，判定是否完成 / 是否该 Replan。"""
 

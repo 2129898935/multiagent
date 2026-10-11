@@ -25,6 +25,7 @@ from pathlib import Path
 from api.context import set_session_context, reset_session_context, set_thread_context
 
 from agent.loop_guard import ProgressDetector
+from agent.planner import PlanTracker, default_scan_plan, tool_to_step_id
 from utils.context_budget import truncate_text
 from db.session_store import update_session_status
 from memory.retrieve import retrieve_memories
@@ -184,6 +185,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     # M7: 死循环防护——进度检测器，识别「同工具同参数重复」的假推进
     detector = ProgressDetector()
 
+    # M4: 结构化计划——追踪扫描进度（解析→查漏洞→查许可证→可达性→报告）
+    plan_tracker = PlanTracker(default_scan_plan())
+
     # 反馈结果
     try:
         # 复用单例 Agent（整个进程只构建一次，会话隔离靠 thread_id）
@@ -227,6 +231,10 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                                         {'description': tool_call['args']['description']}
                                     )
                                 else:
+                                    # M4: 根据工具调用更新计划步骤进度
+                                    step_id = tool_to_step_id(tool_call['name'])
+                                    if step_id:
+                                        plan_tracker.mark(step_id, "done")
                                     # M7: 观察工具调用，检测假推进/死循环（只按「同工具同参数」判定）
                                     detector.observe(tool_call['name'], tool_call.get('args', {}))
                                     if detector.is_stuck():
@@ -241,6 +249,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         if user_id and final_result:
             for m in await extract_memories(task_query + "\n" + final_result, model):
                 add_memory(user_id, m["type"], m["content"])
+
+        # M4: 报告计划执行进度
+        print(f"[Plan] 扫描计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")
 
         update_session_status(session_id, "done")  # M1: 会话状态 → done
 

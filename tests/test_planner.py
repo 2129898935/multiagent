@@ -1,5 +1,5 @@
 """M4 —— 结构化 Plan/Replan 单元测试。"""
-from agent.planner import PlanTracker, default_scan_plan
+from agent.planner import PlanTracker, default_scan_plan, tool_to_step_id
 
 
 def test_default_scan_plan_has_five_steps():
@@ -44,3 +44,12 @@ def test_success_resets_failure_count():
 def test_summary_contains_steps():
     summary = PlanTracker(default_scan_plan()).summary()
     assert "S1" in summary and "S5" in summary
+
+
+def test_tool_to_step_id():
+    assert tool_to_step_id("query_osv_vulns") == "S2"
+    assert tool_to_step_id("parse_requirements_tool") == "S1"
+    assert tool_to_step_id("query_package_info") == "S3"
+    assert tool_to_step_id("generate_markdown") == "S5"
+    assert tool_to_step_id("query_advisory") == "S2"   # GHSA 详情也属查漏洞
+    assert tool_to_step_id("internet_search") is None  # 非依赖扫描工具不映射
