@@ -1,4 +1,6 @@
 """M3 —— 长期记忆存储/召回单元测试。"""
+import sqlite3
+
 import memory.store as ms
 from memory.retrieve import retrieve_memories
 
@@ -46,10 +48,52 @@ def test_retrieve_formats(monkeypatch, tmp_path):
     monkeypatch.setattr(ms, "_db_path", tmp_path / "memories.db")
     ms.add_memory("alice", "USER_PREFERENCE", "偏好保守升级")
     text = retrieve_memories("alice")
-    assert "【用户长期记忆】" in text
+    assert "与当前任务相关的用户长期记忆" in text
     assert "保守升级" in text
 
 
 def test_retrieve_empty():
     assert retrieve_memories("nobody") == ""
     assert retrieve_memories("") == ""
+
+
+def test_semantic_retrieval_prefers_relevant_memory(monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "_db_path", tmp_path / "memories.db")
+    ms.add_memory("alice", "USER_PREFERENCE", "依赖升级优先选择保守方案")
+    ms.add_memory("alice", "USER_PREFERENCE", "周末喜欢徒步和喝咖啡")
+
+    text = retrieve_memories("alice", query="这次依赖升级采用什么策略？", limit=1)
+
+    assert "保守方案" in text
+    assert "徒步" not in text
+
+
+def test_semantic_retrieval_isolated_by_user(monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "_db_path", tmp_path / "memories.db")
+    ms.add_memory("alice", "DECISION", "requests 固定在 2.31.0")
+    ms.add_memory("bob", "DECISION", "requests 升级到 2.32.4")
+
+    results = ms.search_memories("alice", "requests 版本决策")
+
+    assert [item["content"] for item in results] == ["requests 固定在 2.31.0"]
+
+
+def test_legacy_row_is_lazily_embedded(monkeypatch, tmp_path):
+    db_path = tmp_path / "memories.db"
+    monkeypatch.setattr(ms, "_db_path", db_path)
+    conn = ms._conn()
+    conn.execute(
+        "INSERT INTO memories (user_id, type, content, created_at, updated_at) VALUES (?,?,?,?,?)",
+        ("alice", "WHITELIST", "内部组件 internal-sdk 已加入白名单", "2025-01-01", "2025-01-01"),
+    )
+    conn.commit()
+    conn.close()
+
+    results = ms.search_memories("alice", "internal-sdk 白名单")
+
+    assert results[0]["content"] == "内部组件 internal-sdk 已加入白名单"
+    conn = sqlite3.connect(db_path)
+    stored = conn.execute("SELECT embedding, embedding_model FROM memories").fetchone()
+    conn.close()
+    assert stored[0]
+    assert stored[1]

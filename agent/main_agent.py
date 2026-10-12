@@ -17,6 +17,7 @@ import asyncio
 import uuid
 import shutil
 from pathlib import Path
+import re
 
 from api.context import set_session_context, reset_session_context, set_thread_context
 
@@ -166,14 +167,15 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     {updated_info_prompt}
 
     规则：
-    1. 新生成文件必须保存到工作目录：'{relative_session_dir_str}/filename'
-    2. 若存在上传文件，必须使用 read_file_content 读取，或委派“依赖解析助手”读取；传递文件名，不要带绝对目录前缀。
-    3. 禁止使用 deepagents 内置的 ls/read_file 读取上传文件：它们是虚拟文件系统，看不到宿主机会话目录。
-    4. 使用相对路径，禁止使用绝对路径
-    5. 依赖解析完成后再进入漏洞、许可证、影响、升级和报告阶段
+    1. 自定义文件工具已通过 ContextVar 锚定工作目录；调用 generate_markdown/write_sbom/read_file_content 时只传文件名，path 留空。
+    2. 禁止把 '{relative_session_dir_str}' 再作为自定义工具的 path 参数，否则会重复嵌套目录。
+    3. 若存在上传文件，必须使用 read_file_content 读取，或委派“依赖解析助手”读取；传递文件名，不要带绝对目录前缀。
+    4. 禁止使用 deepagents 内置的 ls/read_file 读取上传文件：它们是虚拟文件系统，看不到宿主机会话目录。
+    5. 使用相对路径，禁止使用绝对路径
+    6. 依赖解析完成后再进入漏洞、许可证、影响、升级和报告阶段
     """
     # M3: 召回用户长期记忆，注入用户消息（跨会话记忆）
-    memory_prompt = retrieve_memories(user_id) if user_id else ""
+    memory_prompt = await asyncio.to_thread(retrieve_memories, user_id, task_query) if user_id else ""
 
     # M2: Context 预算——输入过长时截断，防止超大输入打爆上下文
     user_content = truncate_text(
@@ -186,6 +188,9 @@ async def run_deep_agent(task_query, session_id, user_id=None):
 
     # M4: 结构化计划——追踪扫描进度（解析→查漏洞→查许可证→可达性→报告）
     plan_tracker = PlanTracker(default_scan_plan())
+    running_subagent_steps: set[str] = set()
+    seen_usage_messages: set[str] = set()
+    token_usage = 0
 
     # 反馈结果
     try:
@@ -211,6 +216,17 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                 if messages and isinstance(messages, list):
                     last_msg = messages[-1]
                     if node_name == 'model':
+                        # 主模型重新获得控制权，说明上一批子 Agent 已经返回。
+                        for completed_step in running_subagent_steps:
+                            plan_tracker.mark(completed_step, "done")
+                        running_subagent_steps.clear()
+
+                        usage = getattr(last_msg, "usage_metadata", None) or {}
+                        message_key = str(getattr(last_msg, "id", "") or id(last_msg))
+                        if message_key not in seen_usage_messages:
+                            token_usage += int(usage.get("total_tokens", 0) or 0)
+                            seen_usage_messages.add(message_key)
+
                         if last_msg.tool_calls:
                             # 工具和子智能体
                             for tool_call in last_msg.tool_calls:
@@ -233,6 +249,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                                     step_id = subagent_to_step_id(subagent_type)
                                     if step_id:
                                         plan_tracker.mark(step_id, "running")
+                                        running_subagent_steps.add(step_id)
                                 else:
                                     # M4: 根据工具调用更新计划步骤进度
                                     step_id = tool_to_step_id(tool_call['name'])
@@ -251,7 +268,20 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         # M3: 任务结束后提炼长期记忆（跨会话有价值的信息）
         if user_id and final_result:
             for m in await extract_memories(task_query + "\n" + final_result, model):
-                add_memory(user_id, m["type"], m["content"])
+                await asyncio.to_thread(add_memory, user_id, m["type"], m["content"])
+
+        # 流结束时，最后一批子 Agent 已返回但可能没有下一轮 model chunk。
+        for completed_step in running_subagent_steps:
+            plan_tracker.mark(completed_step, "done")
+        running_subagent_steps.clear()
+
+        finding_count = len(set(re.findall(
+            r"\b(?:CVE-\d{4}-\d+|GHSA-[0-9a-z-]+)\b",
+            final_result,
+            re.IGNORECASE,
+        )))
+        from db.session_store import update_session_metrics
+        update_session_metrics(session_id, token_usage=token_usage, finding_count=finding_count)
 
         # M4: 报告计划执行进度
         print(f"[Plan] 六阶段计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")

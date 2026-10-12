@@ -32,3 +32,12 @@ def test_title_saved_and_listed(monkeypatch, tmp_path):
     by_id = {s["id"]: s for s in ss.list_sessions()}
     assert by_id["t1"]["title"] == "分析销售趋势"
     assert by_id["t2"]["title"] == "查询依赖漏洞"
+
+
+def test_update_session_metrics(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "_db_path", tmp_path / "sessions.db")
+    ss.create_session("t1", "alice")
+    ss.update_session_metrics("t1", token_usage=1234, finding_count=7)
+    session = ss.get_session("t1")
+    assert session["token_usage"] == 1234
+    assert session["finding_count"] == 7

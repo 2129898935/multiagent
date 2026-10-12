@@ -82,3 +82,16 @@ def list_sessions() -> list[dict]:
         return [dict(zip(cols, r)) for r in rows]
     finally:
         conn.close()
+
+
+def update_session_metrics(thread_id: str, token_usage: int | None = None, finding_count: int | None = None) -> None:
+    """更新任务用量与发现数量；未提供的字段保持不变。"""
+    conn = _conn()
+    try:
+        conn.execute(
+            "UPDATE sessions SET token_usage=COALESCE(?, token_usage), finding_count=COALESCE(?, finding_count) WHERE id=?",
+            (token_usage, finding_count, thread_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()

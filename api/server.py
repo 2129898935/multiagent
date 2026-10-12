@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
 from pydantic import BaseModel
 from typing import List
 import shutil
+from contextlib import asynccontextmanager
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -31,7 +32,22 @@ from api.monitor import manager
 from api.auth import create_access_token, get_current_user
 from db.session_store import create_session, list_sessions
 
-app = FastAPI(title="DepGuard Agent API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """绑定 WebSocket 事件循环，并在停机时释放任务与 checkpoint。"""
+    loop = asyncio.get_running_loop()
+    manager.set_loop(loop)
+    print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
+    try:
+        yield
+    finally:
+        registry.cancel_all()
+        from agent.main_agent import close_agent
+        await close_agent()
+        print("[Server] 优雅停机完成")
+
+
+app = FastAPI(title="DepGuard Agent API", lifespan=lifespan)
 
 # 挂载输出目录，以便前端访问生成的静态文件
 # 假设输出目录位于项目根目录下的 output
@@ -69,25 +85,6 @@ app.add_middleware(
 class TaskRequest(BaseModel):
     query: str
     thread_id: str = None
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    服务启动时，获取当前运行的事件循环，并绑定到 WebSocket 管理器。
-    确保后台线程能通过 run_coroutine_threadsafe 准确投递消息。
-    """
-    loop = asyncio.get_running_loop()
-    manager.set_loop(loop)
-    print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """M10: 优雅停机——取消在途任务 + 关闭 checkpointer 连接。"""
-    registry.cancel_all()
-    from agent.main_agent import close_agent
-    await close_agent()
-    print("[Server] 优雅停机完成")
 
 
 @app.post("/api/login")

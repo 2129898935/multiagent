@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     max_iterations: int = 30
     max_duration_seconds: int = 300
     token_budget_ratio: float = 0.6
+    embedding_model: str | None = None
 
     # DepGuard 业务
     severity_threshold: str = "MEDIUM"
