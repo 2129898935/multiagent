@@ -6,6 +6,7 @@ from agent.subagents.upgrade_planning_agent import upgrade_planning_agent
 from agent.subagents.report_review_agent import report_review_agent
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from tools.upload_file_read_tool import read_file_content
+from agent.parallel_analysis import parallel_dependency_analysis
 
 from deepagents import create_deep_agent
 
@@ -68,13 +69,10 @@ async def get_agent():
         _agent = create_deep_agent(
             model=model,
             system_prompt=main_agent_content["system_prompt"],
-            tools=[read_file_content],
+            tools=[read_file_content, parallel_dependency_analysis],
             checkpointer=_checkpointer,
             subagents=[
                 dependency_parser_agent,
-                vulnerability_intelligence_agent,
-                license_maintenance_agent,
-                impact_analysis_agent,
                 upgrade_planning_agent,
                 report_review_agent,
             ],
@@ -173,7 +171,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     3. 若存在上传文件，必须使用 read_file_content 读取，或委派“依赖解析助手”读取；传递文件名，不要带绝对目录前缀。
     4. 禁止使用 deepagents 内置的 ls/read_file 读取上传文件：它们是虚拟文件系统，看不到宿主机会话目录。
     5. 使用相对路径，禁止使用绝对路径
-    6. 依赖解析完成后再进入漏洞、许可证、影响、升级和报告阶段
+    6. 扫描 DAG 固定依赖为：S1 → [S2、S3、S4 并行] → S5 → S6。S1 后必须调用 parallel_dependency_analysis，一次同时启动三个分支；汇合成功后才能进入 S5。
     """
     # M3: 召回用户长期记忆，注入用户消息（跨会话记忆）
     memory_prompt = await asyncio.to_thread(retrieve_memories, user_id, task_query) if user_id else ""
@@ -191,6 +189,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     plan_tracker = PlanTracker(default_scan_plan())
     running_subagent_steps: set[str] = set()
     seen_usage_messages: set[str] = set()
+    subagent_call_counts: dict[str, int] = {}
     token_usage = 0
 
     # 反馈结果
@@ -243,6 +242,12 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                                 if tool_call['name'] == 'task':
                                     # 调用某个子智能体
                                     subagent_type = tool_call['args']['subagent_type']
+                                    subagent_call_counts[subagent_type] = subagent_call_counts.get(subagent_type, 0) + 1
+                                    if subagent_call_counts[subagent_type] > 2:
+                                        raise RuntimeError(
+                                            f"阶段子 Agent 重复调用超过上限: {subagent_type}；"
+                                            "首次执行加一次局部重试后仍未收敛"
+                                        )
                                     monitor.report_assistant(
                                         subagent_type,
                                         {'description': tool_call['args']['description']}

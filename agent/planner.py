@@ -1,10 +1,12 @@
 """DepGuard 六阶段结构化 Plan / Replan 与进度映射。"""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PlanStep(BaseModel):
     id: str
     description: str
+    depends_on: list[str] = Field(default_factory=list)
+    parallel_group: str | None = None
     status: str = "pending"  # pending / running / done / failed
 
 
@@ -14,16 +16,16 @@ class Plan(BaseModel):
 
 
 def default_scan_plan() -> Plan:
-    """DepGuard 默认六阶段流水线。"""
+    """DepGuard 默认六阶段 DAG：S1 → [S2,S3,S4] → S5 → S6。"""
     return Plan(
         name="depguard-analysis",
         steps=[
             PlanStep(id="S1", description="解析并标准化依赖"),
-            PlanStep(id="S2", description="聚合并去重漏洞情报"),
-            PlanStep(id="S3", description="评估许可证与维护性"),
-            PlanStep(id="S4", description="分析源码引用与影响"),
-            PlanStep(id="S5", description="制定最小安全升级路径"),
-            PlanStep(id="S6", description="生成并审查报告与 SBOM"),
+            PlanStep(id="S2", description="聚合并去重漏洞情报", depends_on=["S1"], parallel_group="analysis"),
+            PlanStep(id="S3", description="评估许可证与维护性", depends_on=["S1"], parallel_group="analysis"),
+            PlanStep(id="S4", description="分析源码引用与影响", depends_on=["S1"], parallel_group="analysis"),
+            PlanStep(id="S5", description="制定最小安全升级路径", depends_on=["S2", "S3", "S4"]),
+            PlanStep(id="S6", description="生成并审查报告与 SBOM", depends_on=["S5"]),
         ],
     )
 
@@ -81,6 +83,14 @@ class PlanTracker:
 
     def done_count(self) -> int:
         return sum(1 for s in self.plan.steps if s.status == "done")
+
+    def ready_steps(self) -> list[PlanStep]:
+        """返回依赖已完成、可以立即调度的步骤；同 parallel_group 可并行启动。"""
+        done = {step.id for step in self.plan.steps if step.status == "done"}
+        return [
+            step for step in self.plan.steps
+            if step.status == "pending" and set(step.depends_on).issubset(done)
+        ]
 
     def is_complete(self) -> bool:
         return all(s.status == "done" for s in self.plan.steps)

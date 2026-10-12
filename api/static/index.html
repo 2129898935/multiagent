@@ -477,6 +477,16 @@ function handleEvent(threadId, d) {
     case 'assistant_call':
       addStep(c, '🤖', labelForAgent(d.data && d.data.assistant_name), (d.data && d.data.args && d.data.args.description) || '');
       break;
+    case 'parallel_group': {
+      const x = d.data || {};
+      const label = x.status === 'started' ? '并行组启动' : '并行组汇合';
+      const elapsed = x.duration_ms != null ? ' · ' + x.duration_ms + ' ms' : '';
+      addStep(c, x.status === 'started' ? '⚡' : '🔀', label, (x.stage_ids || []).join(' + ') + elapsed);
+      break;
+    }
+    case 'agent_status':
+      upsertParallelStep(c, d.data || {});
+      break;
     case 'task_result':
       last.content = (d.data && d.data.result) || d.message || '完成';
       last.status = 'done';
@@ -497,6 +507,23 @@ function addStep(c, icon, label, detail) {
   const last = c.messages[c.messages.length - 1];
   if (!last || !last.steps) last.steps = [];
   last.steps.push({ icon, label, detail: detail || '' });
+}
+
+function upsertParallelStep(c, data) {
+  const last = c.messages[c.messages.length - 1];
+  if (!last || !last.steps) last.steps = [];
+  const key = 'parallel:' + data.group_id + ':' + data.stage_id;
+  let step = last.steps.find(item => item.key === key);
+  const statusText = data.status === 'started' ? '并行运行中' : data.status === 'completed' ? '已完成' : '失败';
+  const elapsed = data.duration_ms != null ? ' · ' + data.duration_ms + ' ms' : '';
+  const detail = statusText + elapsed + (data.error ? ' · ' + data.error : '');
+  if (!step) {
+    step = { key, icon: data.status === 'started' ? '⚡' : '✅', label: data.stage_id + ' ' + labelForAgent(data.assistant_name), detail };
+    last.steps.push(step);
+  } else {
+    step.icon = data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⚡';
+    step.detail = detail;
+  }
 }
 
 function markError(id, msg) {

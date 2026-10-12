@@ -61,3 +61,17 @@ def test_subagent_to_step_id():
     assert subagent_to_step_id("依赖解析助手") == "S1"
     assert subagent_to_step_id("报告与审查助手") == "S6"
     assert subagent_to_step_id("市场情报助手") is None
+
+
+def test_dag_exposes_parallel_wave():
+    tracker = PlanTracker(default_scan_plan())
+    assert [step.id for step in tracker.ready_steps()] == ["S1"]
+
+    tracker.mark("S1", "done")
+    ready = tracker.ready_steps()
+    assert [step.id for step in ready] == ["S2", "S3", "S4"]
+    assert {step.parallel_group for step in ready} == {"analysis"}
+
+    for step_id in ("S2", "S3", "S4"):
+        tracker.mark(step_id, "done")
+    assert [step.id for step in tracker.ready_steps()] == ["S5"]

@@ -115,12 +115,58 @@ class ToolMonitor:
         self._emit("assistant_call", f"正在调用助手: {assistant_name}",
                    {"assistant_name": assistant_name, "args": args})
 
+    def report_parallel_group(
+        self,
+        group_id: str,
+        stage_ids: list[str],
+        status: str,
+        duration_ms: int | None = None,
+    ):
+        """报告 fan-out/fan-in 并行组状态。"""
+        data = {
+            "group_id": group_id,
+            "stage_ids": stage_ids,
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+        self._emit("parallel_group", f"并行分析组 {status}: {', '.join(stage_ids)}", data)
+        self._write_trace(
+            "parallel_group", args=data,
+            result_summary=f"{status}: {', '.join(stage_ids)}", status=status,
+            duration_ms=duration_ms,
+        )
+
+    def report_agent_status(
+        self,
+        stage_id: str,
+        assistant_name: str,
+        status: str,
+        group_id: str,
+        duration_ms: int | None = None,
+        error: str = "",
+    ):
+        """报告并行分支的 started/completed/failed 状态。"""
+        data = {
+            "stage_id": stage_id,
+            "assistant_name": assistant_name,
+            "status": status,
+            "group_id": group_id,
+            "duration_ms": duration_ms,
+            "error": error,
+        }
+        self._emit("agent_status", f"{stage_id} {assistant_name}: {status}", data)
+        self._write_trace(
+            "parallel_agent", tool_name=assistant_name, args=data,
+            result_summary=error or status, status=status,
+            duration_ms=duration_ms,
+        )
+
     def report_task_result(self, result: str):
         """报告任务最终结果"""
         self._emit("task_result", "任务执行完成", {"result": result})
         self._write_trace("result", result_summary=result[:200], status="done")
 
-    def _write_trace(self, node: str, tool_name: str | None = None, args: Dict[str, Any] | None = None, result_summary: str = "", status: str = "ok"):
+    def _write_trace(self, node: str, tool_name: str | None = None, args: Dict[str, Any] | None = None, result_summary: str = "", status: str = "ok", duration_ms: int | None = None):
         """M8: 把事件写入 traces 表（写入失败不影响主流程）。"""
         try:
             from db.trace_store import add_trace
@@ -131,6 +177,7 @@ class ToolMonitor:
                 args=args,
                 result_summary=result_summary,
                 status=status,
+                duration_ms=duration_ms,
             )
         except Exception:
             pass
