@@ -78,22 +78,27 @@ def test_semantic_retrieval_isolated_by_user(monkeypatch, tmp_path):
     assert [item["content"] for item in results] == ["requests 固定在 2.31.0"]
 
 
-def test_legacy_row_is_lazily_embedded(monkeypatch, tmp_path):
+def test_legacy_row_is_not_recalled_until_reconfirmed(monkeypatch, tmp_path):
     db_path = tmp_path / "memories.db"
     monkeypatch.setattr(ms, "_db_path", db_path)
     conn = ms._conn()
     conn.execute(
         "INSERT INTO memories (user_id, type, content, created_at, updated_at) VALUES (?,?,?,?,?)",
-        ("alice", "WHITELIST", "内部组件 internal-sdk 已加入白名单", "2025-01-01", "2025-01-01"),
+        ("alice", "DECISION", "系统曾建议升级 internal-sdk", "2025-01-01", "2025-01-01"),
     )
     conn.commit()
     conn.close()
 
-    results = ms.search_memories("alice", "internal-sdk 白名单")
+    assert ms.search_memories("alice", "internal-sdk 升级决策") == []
 
-    assert results[0]["content"] == "内部组件 internal-sdk 已加入白名单"
     conn = sqlite3.connect(db_path)
-    stored = conn.execute("SELECT embedding, embedding_model FROM memories").fetchone()
+    source = conn.execute("SELECT source FROM memories").fetchone()[0]
     conn.close()
-    assert stored[0]
-    assert stored[1]
+    assert source == "legacy_unverified"
+
+
+def test_explicit_memory_is_semantically_recalled(monkeypatch, tmp_path):
+    monkeypatch.setattr(ms, "_db_path", tmp_path / "memories.db")
+    ms.add_memory("alice", "DECISION", "我决定将 internal-sdk 升级到 3.0")
+    results = ms.search_memories("alice", "internal-sdk 升级决策")
+    assert results[0]["content"] == "我决定将 internal-sdk 升级到 3.0"

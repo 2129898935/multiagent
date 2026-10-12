@@ -9,7 +9,7 @@ import re
 
 _MEMORY_TYPES = {"USER_PREFERENCE", "IGNORED_CVE", "WHITELIST", "DECISION"}
 
-_EXTRACT_PROMPT = """你是一个记忆提炼器。从下面的对话中，判断是否有「值得跨会话长期记住」的信息。
+_EXTRACT_PROMPT = """你是一个记忆提炼器。输入内容只允许是用户原始消息。仅提取用户明确、主动表达且适合跨会话保留的信息。
 
 值得记的信息类型（type 只能是以下之一）：
 - USER_PREFERENCE：用户的持久偏好（例如「偏好保守升级」「优先修高危」）
@@ -17,12 +17,13 @@ _EXTRACT_PROMPT = """你是一个记忆提炼器。从下面的对话中，判�
 - WHITELIST：用户认可、纳入白名单的依赖包
 - DECISION：用户做出的历史决策（例如「决定升级到某版本」）
 
-不值得记的：寒暄、一次性查询、当前会话的临时内容。
+不值得记的：Agent 的建议或结论、从扫描报告推断出的偏好、一次性查询、当前会话临时内容。
+DECISION/IGNORED_CVE/WHITELIST 必须有用户明确的决定性措辞；不得把系统推荐写成用户决定。
 
 严格输出 JSON 数组，每项格式 {"type": "...", "content": "..."}。
 如果没有值得记的，输出 []。不要输出任何其它文字。
 
-对话内容：
+用户原始消息：
 {conversation}
 
 输出："""

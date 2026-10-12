@@ -45,33 +45,35 @@ def _get_vuln_detail(vuln_id: str) -> dict:
     return data
 
 
-def _extract_fixed(vuln: dict) -> str:
-    """从 affected[].ranges[].events[] 提取第一个 fixed（修复版本）。"""
-    for a in vuln.get("affected", []):
-        for rng in a.get("ranges", []):
-            for e in rng.get("events", []):
-                if "fixed" in e:
-                    return e["fixed"]
-    return ""
+def _extract_fixed(vuln: dict) -> list[str]:
+    """提取全部 fixed 事件，避免把不同版本线的修复边界压成一个版本。"""
+    fixed: list[str] = []
+    for affected in vuln.get("affected", []):
+        for version_range in affected.get("ranges", []):
+            for event in version_range.get("events", []):
+                value = event.get("fixed")
+                if value and value not in fixed:
+                    fixed.append(value)
+    return fixed
 
 
-def _cvss_level(vector: str) -> str:
-    """从 CVSS 3.x 向量粗略推断严重等级（近似；精确分数可交给 NVD 源）。"""
-    if not vector:
-        return ""
-    metrics = {}
-    for part in vector.split("/"):
-        if len(part) >= 2 and part[1] == ":":
-            metrics[part[0]] = part[2]
-    c, i, a = metrics.get("C", "N"), metrics.get("I", "N"), metrics.get("A", "N")
-    highs = sum(1 for x in (c, i, a) if x == "H")
-    if highs == 3:
-        return "Critical"
-    if highs >= 1:
-        return "High"
-    if "L" in (c, i, a):
-        return "Medium"
-    return "Low"
+def _detail(vuln: dict) -> dict:
+    """保留 OSV 原始证据；不从 CVSS 向量自行推断严重度。"""
+    return {
+        "id": vuln.get("id"),
+        "aliases": vuln.get("aliases", []),
+        "summary": vuln.get("summary") or "",
+        "severity": vuln.get("severity", []),
+        "database_specific": vuln.get("database_specific", {}),
+        "fixed_versions": _extract_fixed(vuln),
+        "modified": vuln.get("modified"),
+        "published": vuln.get("published"),
+        "references": [
+            {"type": item.get("type"), "url": item.get("url")}
+            for item in vuln.get("references", [])
+            if item.get("url")
+        ],
+    }
 
 
 @tool
@@ -79,61 +81,60 @@ def query_osv_vulns(
     package_names: list[str],
     ecosystem: str = "PyPI",
     versions: list[str] | None = None,
-    max_details: int = 30,
+    max_details: int = 100,
 ) -> str:
-    """批量查询多个包的已知漏洞（OSV.dev），返回「ID + 等级 + 摘要 + CVE 别名 + 修复版本」。
+    """批量查询漏洞并返回结构化 OSV 证据。
 
-    ecosystem: 包生态（PyPI/npm/Maven/Go 等），默认 PyPI。
-    versions: 可选，与 package_names 对齐，传入后按版本精确匹配。
-    max_details: 最多为多少条漏洞补全详情（每包前 3 条优先，其余只返回 ID，控制请求量）。
+    severity 保留 OSV 原始 CVSS 向量，不自行映射 Critical/High；
+    最终等级应由 NVD/GHSA 的明确 score/severity 确认。
     """
-    # 注意：querybatch 要求 package 里必须带 ecosystem，只传 name 会返回 400
     queries = []
-    for i, n in enumerate(package_names):
-        q = {"package": {"name": n, "ecosystem": ecosystem}}
-        if versions and i < len(versions) and versions[i]:
-            q["version"] = versions[i]
-        queries.append(q)
+    for index, name in enumerate(package_names):
+        query = {"package": {"name": name, "ecosystem": ecosystem}}
+        if versions and index < len(versions) and versions[index]:
+            query["version"] = versions[index]
+        queries.append(query)
 
     data = _query_osv({"queries": queries})
-
-    lines: list[str] = []
+    packages: list[dict] = []
     detail_count = 0
-    per_package = 3  # 每包最多补全几条详情，避免单个包占满请求配额
-    for i, name in enumerate(package_names):
-        res = data.get("results", [])[i] if i < len(data.get("results", [])) else {}
-        vulns = res.get("vulns", [])
-        ver = versions[i] if versions and i < len(versions) and versions[i] else ""
-        label = f"{name} {ver}".strip()
-        if not vulns:
-            lines.append(f"{label}: 未发现已知漏洞")
-            continue
-        lines.append(f"{label}: {len(vulns)} 条漏洞")
-        for j, v in enumerate(vulns):
-            vid = v.get("id", "")
-            if j < per_package and detail_count < max_details:
-                try:
-                    d = _get_vuln_detail(vid)
-                    sev = _cvss_level((d.get("severity") or [{}])[0].get("score", ""))
-                    aliases = ", ".join(d.get("aliases", []))
-                    summary = (d.get("summary") or "").strip()
-                    fixed = _extract_fixed(d)
-                    parts = [vid]
-                    if sev:
-                        parts.append(f"等级:{sev}")
-                    if summary:
-                        parts.append(summary[:80])
-                    if aliases:
-                        parts.append(f"CVE:{aliases}")
-                    if fixed:
-                        parts.append(f"修复:{fixed}")
-                    lines.append("  - " + " | ".join(parts))
-                    detail_count += 1
-                except Exception:
-                    lines.append(f"  - {vid}")
-            else:
-                lines.append(f"  - {vid}")
-    return "\n".join(lines) or "未发现已知漏洞"
+    detail_limit_reached = False
+    results = data.get("results", [])
+    for index, name in enumerate(package_names):
+        response = results[index] if index < len(results) else {}
+        summaries = response.get("vulns", [])
+        version = versions[index] if versions and index < len(versions) else ""
+        details = []
+        omitted_ids = []
+        for summary in summaries:
+            vuln_id = summary.get("id")
+            if not vuln_id:
+                continue
+            if detail_count >= max_details:
+                omitted_ids.append(vuln_id)
+                detail_limit_reached = True
+                continue
+            try:
+                details.append(_detail(_get_vuln_detail(vuln_id)))
+                detail_count += 1
+            except Exception as exc:
+                details.append({"id": vuln_id, "detail_error": str(exc)})
+        packages.append({
+            "name": name,
+            "version": version,
+            "total_vulnerabilities": len(summaries),
+            "vulnerabilities": details,
+            "omitted_ids": omitted_ids,
+        })
+    return json.dumps({
+        "source": "OSV",
+        "ecosystem": ecosystem,
+        "packages": packages,
+        "detailed_vulnerabilities": detail_count,
+        "detail_limit": max_details,
+        "detail_limit_reached": detail_limit_reached,
+        "severity_policy": "OSV CVSS vectors are preserved verbatim; do not infer labels from impact metrics.",
+    }, ensure_ascii=False)
 
 
 def query_osv_vuln_ids(

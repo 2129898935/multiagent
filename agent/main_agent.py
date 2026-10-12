@@ -28,6 +28,7 @@ from db.session_store import update_session_status
 from memory.retrieve import retrieve_memories
 from memory.extract import extract_memories
 from memory.store import add_memory
+from tools.sbom_tool import validate_deliverables
 
 from langchain_core.messages import AIMessage
 
@@ -267,7 +268,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
 
         # M3: 任务结束后提炼长期记忆（跨会话有价值的信息）
         if user_id and final_result:
-            for m in await extract_memories(task_query + "\n" + final_result, model):
+            for m in await extract_memories(task_query, model):
                 await asyncio.to_thread(add_memory, user_id, m["type"], m["content"])
 
         # 流结束时，最后一批子 Agent 已返回但可能没有下一轮 model chunk。
@@ -282,6 +283,18 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         )))
         from db.session_store import update_session_metrics
         update_session_metrics(session_id, token_usage=token_usage, finding_count=finding_count)
+
+        # 交付门禁：只要生成了扫描报告或 SBOM，就必须存在标准文件且机器校验通过。
+        report_path = session_dir / "dependency_risk_report.md"
+        sbom_path = session_dir / "sbom.cdx.json"
+        legacy_sbom_path = session_dir / "sbom.json"
+        if report_path.exists() or sbom_path.exists() or legacy_sbom_path.exists():
+            gate = json.loads(validate_deliverables.func(
+                report_filename=report_path.name,
+                sbom_filename=sbom_path.name,
+            ))
+            if not gate.get("ok"):
+                raise RuntimeError("交付物校验失败：" + "；".join(gate.get("errors", [])))
 
         # M4: 报告计划执行进度
         print(f"[Plan] 六阶段计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")

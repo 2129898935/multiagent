@@ -28,3 +28,18 @@ def test_parse_plain_text():
 
 def test_parse_ignores_empty_content():
     assert _parse_memories('[{"type": "WHITELIST", "content": ""}]') == []
+
+
+def test_extract_prompt_rejects_agent_recommendations():
+    from memory.extract import _EXTRACT_PROMPT
+
+    assert "Agent 的建议或结论" in _EXTRACT_PROMPT
+    assert "必须有用户明确的决定性措辞" in _EXTRACT_PROMPT
+
+
+def test_main_agent_only_extracts_from_user_query():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "agent" / "main_agent.py").read_text(encoding="utf-8")
+    assert "extract_memories(task_query, model)" in source
+    assert "extract_memories(task_query + " not in source

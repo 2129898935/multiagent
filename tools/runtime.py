@@ -15,6 +15,9 @@ TOOL_PERMISSIONS = {
     "get_table_data": "read",
     "execute_sql_query": "read",   # 只读，但仍要过 SQL 白名单
     "generate_markdown": "write",
+    "write_sbom": "write",
+    "validate_deliverables": "read",
+    "validate_evidence_bundle": "read",
     "convert_md_to_pdf": "write",
     "create_pr": "dangerous",      # DepGuard 后续会用
 }

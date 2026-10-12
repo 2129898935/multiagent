@@ -40,7 +40,17 @@ def query_advisory(ghsa_id: str) -> str:
                 "severity": a.get("severity"),
                 "summary": a.get("summary"),
                 "published_at": a.get("published_at"),
-                "cvss_score": a.get("cvss", {}).get("score"),
+                "cvss": a.get("cvss", {}),
+                "cvss_severities": a.get("cvss_severities", {}),
+                "cve_id": a.get("cve_id"),
+                "vulnerabilities": [
+                    {
+                        "package": item.get("package"),
+                        "vulnerable_version_range": item.get("vulnerable_version_range"),
+                        "first_patched_version": item.get("first_patched_version"),
+                    }
+                    for item in a.get("vulnerabilities", [])
+                ],
             },
             ensure_ascii=False,
         )

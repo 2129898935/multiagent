@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS memories (
     content TEXT NOT NULL,
     embedding TEXT,
     embedding_model TEXT,
+    source TEXT NOT NULL DEFAULT 'legacy_unverified',
     created_at TEXT,
     updated_at TEXT
 )
@@ -42,6 +43,8 @@ def _conn() -> sqlite3.Connection:
         conn.execute("ALTER TABLE memories ADD COLUMN embedding TEXT")
     if "embedding_model" not in columns:
         conn.execute("ALTER TABLE memories ADD COLUMN embedding_model TEXT")
+    if "source" not in columns:
+        conn.execute("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy_unverified'")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_memories_user_updated ON memories(user_id, updated_at DESC)"
     )
@@ -49,11 +52,13 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def add_memory(user_id: str, type_: str, content: str) -> None:
+def add_memory(user_id: str, type_: str, content: str, source: str = "user_explicit") -> None:
     """写入记忆及其向量；完全相同的记忆刷新时间并更新向量。"""
     content = content.strip()
     if not user_id or not content or type_ not in MemoryType.ALL:
         return
+    if source not in {"user_explicit", "legacy_unverified"}:
+        source = "legacy_unverified"
     embedding_model, vector = embed_text(content)
     embedding = json.dumps(vector)
     now = datetime.now().isoformat()
@@ -65,15 +70,15 @@ def add_memory(user_id: str, type_: str, content: str) -> None:
         ).fetchone()
         if row:
             conn.execute(
-                "UPDATE memories SET embedding=?, embedding_model=?, updated_at=? WHERE id=?",
-                (embedding, embedding_model, now, row[0]),
+                "UPDATE memories SET embedding=?, embedding_model=?, source=?, updated_at=? WHERE id=?",
+                (embedding, embedding_model, source, now, row[0]),
             )
         else:
             conn.execute(
                 "INSERT INTO memories "
-                "(user_id, type, content, embedding, embedding_model, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (user_id, type_, content, embedding, embedding_model, now, now),
+                "(user_id, type, content, embedding, embedding_model, source, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, type_, content, embedding, embedding_model, source, now, now),
             )
         conn.commit()
     finally:
@@ -84,7 +89,7 @@ def _row_dicts(rows: list[tuple], columns: list[str]) -> list[dict]:
     return [dict(zip(columns, row)) for row in rows]
 
 
-def list_memories(user_id: str, type_: str | None = None, limit: int = 20) -> list[dict]:
+def list_memories(user_id: str, type_: str | None = None, limit: int = 20, trusted_only: bool = False) -> list[dict]:
     """按更新时间读取记忆；主要用于管理界面和无查询时的兼容降级。"""
     conn = _conn()
     try:
@@ -93,6 +98,8 @@ def list_memories(user_id: str, type_: str | None = None, limit: int = 20) -> li
         if type_:
             where += " AND type=?"
             params.append(type_)
+        if trusted_only:
+            where += " AND source='user_explicit'"
         params.append(max(1, limit))
         cursor = conn.execute(
             "SELECT id, user_id, type, content, created_at, updated_at "
@@ -122,7 +129,7 @@ def search_memories(
     try:
         cursor = conn.execute(
             "SELECT id, user_id, type, content, embedding, embedding_model, created_at, updated_at "
-            "FROM memories WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
+            "FROM memories WHERE user_id=? AND source='user_explicit' ORDER BY updated_at DESC LIMIT ?",
             (user_id, max(limit, candidate_limit)),
         )
         columns = [item[0] for item in cursor.description]
