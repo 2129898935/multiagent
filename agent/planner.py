@@ -1,8 +1,4 @@
-"""结构化 Plan / Replan（M4）：扫描计划 + 升级计划双阶段，含进度追踪与 Replan 判定。
-
-背景：光靠 prompt 让模型「先列 todo」不可校验、无反馈闭环、不可观测。
-用结构化 Plan（机器可读、可追踪）+ 事件驱动 Replan（连续失败触发）。
-"""
+"""DepGuard 六阶段结构化 Plan / Replan 与进度映射。"""
 from pydantic import BaseModel
 
 
@@ -18,31 +14,50 @@ class Plan(BaseModel):
 
 
 def default_scan_plan() -> Plan:
-    """DepGuard 默认扫描计划（解析 → 查漏洞 → 查许可证 → 可达性 → 报告）。"""
+    """DepGuard 默认六阶段流水线。"""
     return Plan(
-        name="scan",
+        name="depguard-analysis",
         steps=[
-            PlanStep(id="S1", description="解析依赖文件"),
-            PlanStep(id="S2", description="查询 OSV 漏洞"),
-            PlanStep(id="S3", description="查询许可证与维护性"),
-            PlanStep(id="S4", description="可达性分析"),
-            PlanStep(id="S5", description="生成风险报告"),
+            PlanStep(id="S1", description="解析并标准化依赖"),
+            PlanStep(id="S2", description="聚合并去重漏洞情报"),
+            PlanStep(id="S3", description="评估许可证与维护性"),
+            PlanStep(id="S4", description="分析源码引用与影响"),
+            PlanStep(id="S5", description="制定最小安全升级路径"),
+            PlanStep(id="S6", description="生成并审查报告与 SBOM"),
         ],
     )
 
 
 def tool_to_step_id(tool_name: str) -> str | None:
-    """把工具名映射到扫描计划的步骤 ID（用于接线时追踪进度）。"""
+    """把确定性工具映射到六阶段步骤。"""
     n = (tool_name or "").lower()
-    if any(k in n for k in ("parse", "requirements", "read_file", "上传")):
+    if any(k in n for k in ("parse", "requirements", "read_file", "osv_scanner")):
         return "S1"
-    if any(k in n for k in ("osv", "advisory", "cvss", "vuln", "cve", "漏洞")):
+    if any(k in n for k in ("osv", "advisory", "cvss", "vuln", "cve")):
         return "S2"
-    if any(k in n for k in ("deps", "package_info", "license", "许可证", "维护")):
+    if any(k in n for k in ("package_info", "dependencies", "license", "repo_health")):
         return "S3"
-    if any(k in n for k in ("sbom", "markdown", "pdf", "report", "报告")):
+    if any(k in n for k in ("impact", "usage", "reachability")):
+        return "S4"
+    if any(k in n for k in ("release", "upgrade")):
         return "S5"
+    if any(k in n for k in ("sbom", "markdown", "pdf", "report")):
+        return "S6"
     return None
+
+
+def subagent_to_step_id(subagent_name: str) -> str | None:
+    """把子智能体显示名映射到六阶段步骤。"""
+    name = subagent_name or ""
+    mapping = {
+        "依赖解析助手": "S1",
+        "漏洞情报助手": "S2",
+        "许可证与维护性助手": "S3",
+        "影响分析助手": "S4",
+        "升级规划助手": "S5",
+        "报告与审查助手": "S6",
+    }
+    return mapping.get(name)
 
 
 class PlanTracker:
@@ -55,12 +70,13 @@ class PlanTracker:
         self._consecutive_failures = 0
 
     def mark(self, step_id: str, status: str) -> None:
-        """更新某个 step 的状态。failed 连续计数，非 failed 清零。"""
+        if status not in {"pending", "running", "done", "failed"}:
+            raise ValueError(f"不支持的计划状态: {status}")
         if step_id in self._by_id:
             self._by_id[step_id].status = status
         if status == "failed":
             self._consecutive_failures += 1
-        else:
+        elif status == "done":
             self._consecutive_failures = 0
 
     def done_count(self) -> int:
@@ -70,7 +86,6 @@ class PlanTracker:
         return all(s.status == "done" for s in self.plan.steps)
 
     def should_replan(self) -> bool:
-        """连续 N 次失败触发 Replan（事件驱动，而非每轮重规划）。"""
         return self._consecutive_failures >= self.replan_after_failures
 
     def summary(self) -> str:

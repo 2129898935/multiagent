@@ -1,11 +1,11 @@
 """M4 —— 结构化 Plan/Replan 单元测试。"""
-from agent.planner import PlanTracker, default_scan_plan, tool_to_step_id
+from agent.planner import PlanTracker, default_scan_plan, subagent_to_step_id, tool_to_step_id
 
 
-def test_default_scan_plan_has_five_steps():
+def test_default_scan_plan_has_six_steps():
     plan = default_scan_plan()
-    assert len(plan.steps) == 5
-    assert plan.steps[0].id == "S1"
+    assert len(plan.steps) == 6
+    assert [step.id for step in plan.steps] == ["S1", "S2", "S3", "S4", "S5", "S6"]
 
 
 def test_mark_and_progress():
@@ -43,13 +43,21 @@ def test_success_resets_failure_count():
 
 def test_summary_contains_steps():
     summary = PlanTracker(default_scan_plan()).summary()
-    assert "S1" in summary and "S5" in summary
+    assert "S1" in summary and "S6" in summary
 
 
 def test_tool_to_step_id():
     assert tool_to_step_id("query_osv_vulns") == "S2"
     assert tool_to_step_id("parse_requirements_tool") == "S1"
     assert tool_to_step_id("query_package_info") == "S3"
-    assert tool_to_step_id("generate_markdown") == "S5"
+    assert tool_to_step_id("generate_markdown") == "S6"
     assert tool_to_step_id("query_advisory") == "S2"   # GHSA 详情也属查漏洞
-    assert tool_to_step_id("internet_search") is None  # 非依赖扫描工具不映射
+    assert tool_to_step_id("analyze_dependency_usage") == "S4"
+    assert tool_to_step_id("query_releases") == "S5"
+    assert tool_to_step_id("internet_search") is None  # 旧 Demo 工具不映射
+
+
+def test_subagent_to_step_id():
+    assert subagent_to_step_id("依赖解析助手") == "S1"
+    assert subagent_to_step_id("报告与审查助手") == "S6"
+    assert subagent_to_step_id("市场情报助手") is None

@@ -1,15 +1,11 @@
-from agent.subagents.knowledge_base_agent import knowledge_base_agent
-from agent.subagents.database_query_agent import database_query_agent
-from agent.subagents.network_search_agent import network_search_agent
-from agent.subagents.vulnerability_agent import vulnerability_agent
+from agent.subagents.dependency_parser_agent import dependency_parser_agent
+from agent.subagents.vulnerability_intelligence_agent import vulnerability_intelligence_agent
+from agent.subagents.license_maintenance_agent import license_maintenance_agent
+from agent.subagents.impact_analysis_agent import impact_analysis_agent
+from agent.subagents.upgrade_planning_agent import upgrade_planning_agent
+from agent.subagents.report_review_agent import report_review_agent
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-# main_agent tool导入
-from tools.markdown_tools import generate_markdown
-from tools.pdf_tools import convert_md_to_pdf
 from tools.upload_file_read_tool import read_file_content
-from tools.osv_tool import query_osv_vulns
-from tools.github_repo_tool import query_repo_health
 
 from deepagents import create_deep_agent
 
@@ -25,7 +21,7 @@ from pathlib import Path
 from api.context import set_session_context, reset_session_context, set_thread_context
 
 from agent.loop_guard import ProgressDetector
-from agent.planner import PlanTracker, default_scan_plan, tool_to_step_id
+from agent.planner import PlanTracker, default_scan_plan, subagent_to_step_id, tool_to_step_id
 from utils.context_budget import truncate_text
 from db.session_store import update_session_status
 from memory.retrieve import retrieve_memories
@@ -70,13 +66,15 @@ async def get_agent():
         _agent = create_deep_agent(
             model=model,
             system_prompt=main_agent_content["system_prompt"],
-            tools=[generate_markdown, convert_md_to_pdf, read_file_content, query_osv_vulns, query_repo_health],
+            tools=[read_file_content],
             checkpointer=_checkpointer,
             subagents=[
-                database_query_agent,
-                network_search_agent,
-                knowledge_base_agent,
-                vulnerability_agent,
+                dependency_parser_agent,
+                vulnerability_intelligence_agent,
+                license_maintenance_agent,
+                impact_analysis_agent,
+                upgrade_planning_agent,
+                report_review_agent,
             ],
         )
         print("[Agent] create_deep_agent 已构建（单例，只应出现一次）")
@@ -169,9 +167,10 @@ async def run_deep_agent(task_query, session_id, user_id=None):
 
     规则：
     1. 新生成文件必须保存到工作目录：'{relative_session_dir_str}/filename'
-    2. 读取已上传的文件时，请直接将文件名（例如：'开篇.txt'）作为 filename 参数传入（read_file_content）读取工具，不要带上任何目录前缀。
-    3. 使用相对路径，禁止使用绝对路径
-    4. 若存在上传文件，请先分析内容
+    2. 若存在上传文件，必须使用 read_file_content 读取，或委派“依赖解析助手”读取；传递文件名，不要带绝对目录前缀。
+    3. 禁止使用 deepagents 内置的 ls/read_file 读取上传文件：它们是虚拟文件系统，看不到宿主机会话目录。
+    4. 使用相对路径，禁止使用绝对路径
+    5. 依赖解析完成后再进入漏洞、许可证、影响、升级和报告阶段
     """
     # M3: 召回用户长期记忆，注入用户消息（跨会话记忆）
     memory_prompt = retrieve_memories(user_id) if user_id else ""
@@ -226,10 +225,14 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                                 """
                                 if tool_call['name'] == 'task':
                                     # 调用某个子智能体
+                                    subagent_type = tool_call['args']['subagent_type']
                                     monitor.report_assistant(
-                                        tool_call['args']['subagent_type'],
+                                        subagent_type,
                                         {'description': tool_call['args']['description']}
                                     )
+                                    step_id = subagent_to_step_id(subagent_type)
+                                    if step_id:
+                                        plan_tracker.mark(step_id, "running")
                                 else:
                                     # M4: 根据工具调用更新计划步骤进度
                                     step_id = tool_to_step_id(tool_call['name'])
@@ -251,7 +254,7 @@ async def run_deep_agent(task_query, session_id, user_id=None):
                 add_memory(user_id, m["type"], m["content"])
 
         # M4: 报告计划执行进度
-        print(f"[Plan] 扫描计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")
+        print(f"[Plan] 六阶段计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")
 
         update_session_status(session_id, "done")  # M1: 会话状态 → done
 

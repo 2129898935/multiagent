@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MultiAgent Search — 多智能体协作分析</title>
+<title>DepGuard Agent — 多智能体协作分析</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -309,7 +309,7 @@
       </div>
       <input type="file" id="fileInput" multiple style="display:none" onchange="onFilesSelected(this.files)">
     </div>
-    <div class="input-hint">支持市场情报 / 数据分析 / 内部知识检索，可上传文件供 Agent 分析</div>
+    <div class="input-hint">支持依赖解析 / 漏洞情报 / 影响分析 / 升级规划，可上传依赖文件或源码</div>
   </div>
 </div>
 
@@ -535,12 +535,12 @@ function renderChat() {
   if (!c || !c.messages.length) {
     el.innerHTML = `<div class="empty-state">
       <div class="logo-big">🛡</div>
-      <h2>MultiAgent Search</h2>
-      <p>多智能体协作分析平台：主智能体调度「市场情报 / 数据分析 / 内部知识」三个子智能体，实时追踪工具调用，并生成 Markdown / PDF 报告。</p>
+      <h2>DepGuard Agent</h2>
+      <p>开源依赖供应链风险分析平台：六个领域 Agent 协作完成依赖解析、漏洞聚合、影响分析、升级规划和报告审查。</p>
       <div class="suggestions">
-        <div class="suggestion" onclick="useSuggestion('帮我分析最近数码电子品类的销售趋势')">📈 分析销售趋势</div>
-        <div class="suggestion" onclick="useSuggestion('查询订单数据里各品类的销售总额')">🗄️ 查询订单数据</div>
-        <div class="suggestion" onclick="useSuggestion('帮我查一下 requests 库有哪些已知漏洞')">🛡 查询依赖漏洞</div>
+        <div class="suggestion" onclick="useSuggestion('分析上传的 requirements.txt，生成漏洞清单和 SBOM')">📦 扫描依赖文件</div>
+        <div class="suggestion" onclick="useSuggestion('检查 requests 是否在生产代码中被引用')">🔎 分析依赖影响</div>
+        <div class="suggestion" onclick="useSuggestion('帮我查一下 requests 2.31.0 的漏洞并给出升级方案')">🛡 规划安全升级</div>
       </div>
     </div>`;
     return;
@@ -674,9 +674,12 @@ function labelForTool(name) {
 }
 function labelForAgent(name) {
   const n = (name || '');
-  if (n.includes('市场') || n.includes('情报')) return '市场情报助手';
-  if (n.includes('数据')) return '数据分析助手';
-  if (n.includes('知识') || n.includes('内部')) return '内部知识助手';
+  if (n.includes('依赖解析')) return '依赖解析助手';
+  if (n.includes('漏洞情报')) return '漏洞情报助手';
+  if (n.includes('许可证') || n.includes('维护性')) return '许可证与维护性助手';
+  if (n.includes('影响分析')) return '影响分析助手';
+  if (n.includes('升级规划')) return '升级规划助手';
+  if (n.includes('报告') || n.includes('审查')) return '报告与审查助手';
   return n || '子智能体';
 }
 function fmtArgs(args) {

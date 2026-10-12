@@ -31,7 +31,7 @@ from api.monitor import manager
 from api.auth import create_access_token, get_current_user
 from db.session_store import create_session, list_sessions
 
-app = FastAPI(title="DeepAgents API")
+app = FastAPI(title="DepGuard Agent API")
 
 # 挂载输出目录，以便前端访问生成的静态文件
 # 假设输出目录位于项目根目录下的 output
@@ -56,7 +56,7 @@ async def root():
     index_path = static_dir / "index.html"
     if index_path.exists():
         return index_path.read_text(encoding="utf-8")
-    return "<h1>MultiAgent-Search API</h1><p>访问 <a href='/docs'>/docs</a> 查看 API 文档</p>"
+    return "<h1>DepGuard Agent API</h1><p>访问 <a href='/docs'>/docs</a> 查看 API 文档</p>"
 
 # 配置 CORS
 app.add_middleware(
@@ -107,14 +107,14 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_current_user
     # 1. [ID 初始化]
     thread_id = request.thread_id or str(uuid.uuid4())
 
-    # 2. [后台执行] 异步运行 Agent，不阻塞主线程
-    # 用注册表启动，任务从此可查询、可取消、可观测（不再「发出去就不管」）
-    registry.start(thread_id, run_deep_agent(request.query, thread_id, user_id))
-
-    # 2.5 [会话持久化] M1: 写入 sessions 表（status=pending，title 用提问截断生成）
+    # 2. [会话持久化] 必须先写 pending，再启动后台任务。
+    # 否则后台协程可能先更新 running，但记录尚不存在，随后又被 pending 覆盖。
     create_session(thread_id, user_id, title=_make_title(request.query))
 
-    # 3. [立即响应]
+    # 3. [后台执行] 异步运行 Agent，不阻塞主线程
+    registry.start(thread_id, run_deep_agent(request.query, thread_id, user_id))
+
+    # 4. [立即响应]
     return {"status": "started", "thread_id": thread_id, "user_id": user_id}
 
 
