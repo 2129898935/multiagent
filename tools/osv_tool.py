@@ -7,6 +7,7 @@
 只用 querybatch 会丢 severity / summary / CVE / 修复版本，导致报告只能靠模型猜。
 """
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 from langchain_core.tools import tool
@@ -81,7 +82,7 @@ def query_osv_vulns(
     package_names: list[str],
     ecosystem: str = "PyPI",
     versions: list[str] | None = None,
-    max_details: int = 100,
+    max_details: int = 1000,
 ) -> str:
     """批量查询漏洞并返回结构化 OSV 证据。
 
@@ -97,6 +98,7 @@ def query_osv_vulns(
 
     data = _query_osv({"queries": queries})
     packages: list[dict] = []
+    selected_ids: list[str] = []
     detail_count = 0
     detail_limit_reached = False
     results = data.get("results", [])
@@ -104,7 +106,7 @@ def query_osv_vulns(
         response = results[index] if index < len(results) else {}
         summaries = response.get("vulns", [])
         version = versions[index] if versions and index < len(versions) else ""
-        details = []
+        wanted_ids = []
         omitted_ids = []
         for summary in summaries:
             vuln_id = summary.get("id")
@@ -114,18 +116,32 @@ def query_osv_vulns(
                 omitted_ids.append(vuln_id)
                 detail_limit_reached = True
                 continue
-            try:
-                details.append(_detail(_get_vuln_detail(vuln_id)))
-                detail_count += 1
-            except Exception as exc:
-                details.append({"id": vuln_id, "detail_error": str(exc)})
+            wanted_ids.append(vuln_id)
+            selected_ids.append(vuln_id)
+            detail_count += 1
         packages.append({
             "name": name,
             "version": version,
             "total_vulnerabilities": len(summaries),
-            "vulnerabilities": details,
+            "wanted_ids": wanted_ids,
             "omitted_ids": omitted_ids,
         })
+
+    # Fetch independent advisory details concurrently. Keep a bounded pool so
+    # Large manifests keep a bounded pool instead of serializing detail requests.
+    unique_ids = list(dict.fromkeys(selected_ids))
+    with ThreadPoolExecutor(max_workers=min(8, len(unique_ids) or 1)) as pool:
+        futures = {vuln_id: pool.submit(_get_vuln_detail, vuln_id)
+                   for vuln_id in unique_ids}
+        detail_by_id = {}
+        for vuln_id, future in futures.items():
+            try:
+                detail_by_id[vuln_id] = _detail(future.result())
+            except Exception as exc:
+                detail_by_id[vuln_id] = {"id": vuln_id, "detail_error": str(exc)}
+    for package in packages:
+        package["vulnerabilities"] = [detail_by_id[vuln_id]
+                                      for vuln_id in package.pop("wanted_ids")]
     return json.dumps({
         "source": "OSV",
         "ecosystem": ecosystem,

@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
@@ -16,7 +17,10 @@ from agent.llm import model
 from agent.subagents.impact_analysis_agent import impact_analysis_agent
 from agent.subagents.license_maintenance_agent import license_maintenance_agent
 from agent.subagents.vulnerability_intelligence_agent import vulnerability_intelligence_agent
+from tools.osv_tool import query_osv_vulns
+from tools.depsdev_tool import query_package_info
 from api.monitor import monitor
+from api.context import get_session_context
 
 _BRANCHES = {
     "S2": vulnerability_intelligence_agent,
@@ -25,6 +29,7 @@ _BRANCHES = {
 }
 _agents: dict[str, Any] | None = None
 _agents_lock = asyncio.Lock()
+BRANCH_TIMEOUT_SECONDS = 600
 
 
 async def _get_agents() -> dict[str, Any]:
@@ -45,6 +50,18 @@ async def _get_agents() -> dict[str, Any]:
     return _agents
 
 
+def _json_evidence(content: str) -> dict:
+    """Extract the JSON object from a branch response."""
+    value = content.strip()
+    start, end = value.find("{"), value.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("分支未返回 JSON 证据")
+    result = json.loads(value[start:end + 1])
+    if not isinstance(result, dict):
+        raise ValueError("分支证据必须是 JSON 对象")
+    return result
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
@@ -55,6 +72,112 @@ def _message_text(message: Any) -> str:
             for block in content
         )
     return str(content)
+
+
+async def _fallback_vulnerability_evidence(component_evidence: str) -> dict:
+    """Use the OSV tool's structured output when S2's prose is invalid JSON."""
+    parsed = json.loads(component_evidence)
+    components = parsed.get("components", []) if isinstance(parsed, dict) else parsed
+    if not isinstance(components, list) or not components:
+        raise ValueError("S2 降级扫描缺少组件清单")
+    names = [str(item["name"]) for item in components]
+    versions = [str(item.get("version") or "") for item in components]
+    # The tool's default cap of 100 silently left most enterprise scans as ID-only.
+    # Keep a safety limit, but size it for the whole manifest rather than a demo.
+    raw = await asyncio.to_thread(query_osv_vulns.func, names, "PyPI", versions, 1000)
+    osv = json.loads(raw)
+    vulnerabilities = []
+    seen = set()
+    for package in osv.get("packages", []):
+        for detail in package.get("vulnerabilities", []):
+            vuln_id = detail.get("id")
+            if not vuln_id or (package.get("name"), vuln_id) in seen:
+                continue
+            seen.add((package.get("name"), vuln_id))
+            explicit_severity = str((detail.get("database_specific") or {}).get("severity") or "").lower()
+            if explicit_severity not in {"critical", "high", "moderate", "medium", "low", "informational"}:
+                explicit_severity = "unknown"
+            elif explicit_severity == "moderate":
+                explicit_severity = "medium"
+            elif explicit_severity == "informational":
+                explicit_severity = "info"
+            ratings = [
+                {"source": "OSV", "cvss_version": item.get("type"),
+                 "vector": item.get("score"), "score": None, "severity": explicit_severity}
+                for item in detail.get("severity", []) if isinstance(item, dict)
+            ]
+            if not ratings and explicit_severity != "unknown":
+                ratings = [{"source": "OSV database_specific", "cvss_version": None,
+                            "vector": None, "score": None, "severity": explicit_severity}]
+            vulnerabilities.append({
+                "canonical_id": vuln_id,
+                "aliases": detail.get("aliases", []),
+                "affected_component": package.get("name"),
+                "affected_ecosystem": "PyPI",
+                "affected_version": package.get("version"),
+                "ratings": ratings,
+                "fixed_versions": detail.get("fixed_versions", []),
+                "summary": detail.get("summary", ""),
+                "references": [r.get("url") for r in detail.get("references", []) if r.get("url")],
+                "evidence_status": "id_only" if detail.get("detail_error") else "confirmed",
+            })
+        for vuln_id in package.get("omitted_ids", []):
+            if (package.get("name"), vuln_id) not in seen:
+                seen.add((package.get("name"), vuln_id))
+                vulnerabilities.append({
+                    "canonical_id": vuln_id, "aliases": [],
+                    "affected_component": package.get("name"),
+                    "affected_ecosystem": "PyPI",
+                    "affected_version": package.get("version"),
+                    "ratings": [], "fixed_versions": [], "summary": "",
+                    "references": [], "evidence_status": "id_only",
+                })
+    id_only_count = sum(item["evidence_status"] == "id_only" for item in vulnerabilities)
+    return {
+        "stage": "S2", "source_status": {
+            "osv": "ok", "ghsa": "not_queried", "nvd": "not_queried",
+            "degradation": "S2 model returned invalid JSON; rebuilt from OSV tool evidence",
+            "detail_limit_reached": bool(osv.get("detail_limit_reached")),
+            "id_only_count": id_only_count,
+        },
+        "components": components,
+        "vulnerabilities": vulnerabilities,
+    }
+
+
+async def _fallback_license_evidence(component_evidence: str) -> dict:
+    """Retain per-package metadata and explicit source errors from deps.dev."""
+    parsed = json.loads(component_evidence)
+    components = parsed.get("components", []) if isinstance(parsed, dict) else parsed
+    if not isinstance(components, list) or not components:
+        raise ValueError("S3 降级扫描缺少组件清单")
+    semaphore = asyncio.Semaphore(8)
+
+    async def one(package: dict) -> dict:
+        async with semaphore:
+            raw = await asyncio.to_thread(
+                query_package_info.func, str(package["name"]),
+                str(package.get("version") or ""), "PYPI"
+            )
+        data = json.loads(raw)
+        return {
+            "name": package["name"], "version": package.get("version", ""),
+            "licenses": data.get("licenses", []),
+            "license_details": data.get("license_details", []),
+            "license_source": "deps.dev" if data.get("ok") else "unknown",
+            "is_deprecated": data.get("is_deprecated"),
+            "published_at": data.get("published_at"),
+            "repository_status": "unknown",
+            "source_error": data.get("error") if not data.get("ok") else None,
+        }
+
+    return {
+        "stage": "S3", "source_status": {
+            "deps_dev": "queried", "ragflow_policy": "not_queried",
+            "degradation": "S3 model returned invalid JSON; rebuilt from deps.dev metadata",
+        },
+        "components": await asyncio.gather(*(one(item) for item in components)),
+    }
 
 
 async def _invoke_branch(
@@ -79,9 +202,35 @@ async def _invoke_branch(
 
 返回本分支的 Evidence Bundle JSON。你与另外两个分支并行运行，不要等待或假设它们的结果。"""
     try:
-        result = await agent.ainvoke({"messages": [{"role": "user", "content": instruction}]})
+        result = await asyncio.wait_for(
+            agent.ainvoke({"messages": [{"role": "user", "content": instruction}]}),
+            timeout=BRANCH_TIMEOUT_SECONDS,
+        )
         messages = result.get("messages", [])
         content = _message_text(messages[-1]) if messages else ""
+        try:
+            evidence = _json_evidence(content)
+            if stage_id == "S2" and not isinstance(evidence.get("vulnerabilities"), list):
+                raise ValueError("S2 证据缺少 vulnerabilities 数组")
+            if stage_id == "S3" and not isinstance(evidence.get("components"), list):
+                raise ValueError("S3 证据缺少 components 数组")
+            degradation = None
+        except ValueError:
+            if stage_id == "S2":
+                evidence = await _fallback_vulnerability_evidence(component_evidence)
+                degradation = "S2 模型 JSON 无效，改用 OSV 原始结构化证据"
+            elif stage_id == "S3":
+                evidence = await _fallback_license_evidence(component_evidence)
+                degradation = "S3 模型 JSON 无效，改用 deps.dev 原始结构化证据"
+            else:
+                raise
+        session_path = get_session_context()
+        evidence_file = f"{stage_id.lower()}_evidence.json"
+        if session_path:
+            (Path(session_path) / evidence_file).write_text(
+                json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
         duration_ms = round((time.perf_counter() - started) * 1000)
         monitor.report_agent_status(stage_id, name, "completed", group_id, duration_ms)
         return {
@@ -89,7 +238,11 @@ async def _invoke_branch(
             "assistant_name": name,
             "status": "completed",
             "duration_ms": duration_ms,
-            "evidence": content,
+            "evidence_file": evidence_file if session_path else None,
+            "evidence_bytes": len(content.encode("utf-8")),
+            "component_count": len(evidence.get("components", [])),
+            "vulnerability_count": len(evidence.get("vulnerabilities", [])),
+            "degradation": degradation,
         }
     except Exception as exc:
         duration_ms = round((time.perf_counter() - started) * 1000)
@@ -109,6 +262,9 @@ async def run_parallel_analysis(
     stage_ids: list[str] | None = None,
 ) -> dict:
     """并发执行指定分支；默认严格同时启动 S2/S3/S4。"""
+    evidence_path = Path(get_session_context() or ".") / "s1_components.json"
+    if evidence_path.is_file():
+        component_evidence = evidence_path.read_text(encoding="utf-8")
     selected = stage_ids or ["S2", "S3", "S4"]
     invalid = [stage for stage in selected if stage not in _BRANCHES]
     if invalid:

@@ -41,3 +41,13 @@ def test_update_session_metrics(monkeypatch, tmp_path):
     session = ss.get_session("t1")
     assert session["token_usage"] == 1234
     assert session["finding_count"] == 7
+
+
+def test_cancelled_session_is_terminal(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "_db_path", tmp_path / "sessions.db")
+    ss.create_session("cancel-me", "alice")
+    ss.update_session_status("cancel-me", "running")
+    ss.update_session_status("cancel-me", "cancelled", "用户取消")
+    session = ss.get_session("cancel-me")
+    assert session["status"] == "cancelled"
+    assert session["finished_at"] is not None

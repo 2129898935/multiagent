@@ -52,7 +52,7 @@ def validate_evidence_bundle_data(bundle: dict) -> dict:
             id_only_count += 1
             continue
         detailed_count += 1
-        if status != "detailed":
+        if status not in {"detailed", "confirmed"}:
             errors.append(f"{canonical_id} 缺少有效 evidence_status")
         if not vulnerability.get("affected_ecosystem"):
             errors.append(f"{canonical_id} 缺少 affected_ecosystem")

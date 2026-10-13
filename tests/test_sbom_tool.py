@@ -76,3 +76,20 @@ def test_validate_sbom_rejects_missing_vulnerability_affects():
         [{"id": "CVE-1", "source": "OSV", "severity": "high"}],
     )
     assert any("缺少 affects" in error for error in validate_sbom_data(data))
+
+
+def test_validate_deliverables_rejects_machine_dump_as_report():
+    with tempfile.TemporaryDirectory() as directory:
+        token = set_session_context(directory)
+        try:
+            write_sbom.func([{"name": "requests", "version": "2.31.0"}],
+                            vulnerabilities=[], filename="sbom.cdx.json")
+            Path(directory, "dependency_risk_report.md").write_text(
+                '# 报告\n- 组件数: 1\n- 唯一漏洞数: 0\n'
+                '## 许可证与维护性\n{\n  "stage": "S3",\n  "components": []\n}\n',
+                encoding="utf-8")
+            result = json.loads(validate_deliverables.func())
+            assert result["ok"] is False
+            assert any("执行摘要" in error for error in result["errors"])
+        finally:
+            reset_session_context(token)

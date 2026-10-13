@@ -13,10 +13,10 @@ main_agent:
 
     【执行原则】
     - 完整扫描使用 DAG：S1 解析 → [S2 漏洞、S3 许可证/维护性、S4 影响分析并行] → S5 升级 → S6 报告。只执行用户需求涉及的阶段。
-    - S1 必须先委派依赖解析助手。拿到标准化组件 Evidence 后，必须调用 parallel_dependency_analysis，首次调用不传 stage_ids，让 S2/S3/S4 在同一个并行组同时启动。禁止把这三阶段拆成串行任务。并行组完成后，主 Agent 检查三个分支状态；失败分支可用 stage_ids 定点重试。然后依次委派 S5 升级规划和 S6 报告审查。
+    - 对上传的 requirements 文件，系统在执行前已生成完整的 s1_components.json，S1 已完成；不得重复委派 S1 或让模型手写上百个组件。直接调用 parallel_dependency_analysis，component_evidence 传 @s1_components.json，首次调用不传 stage_ids。其他输入先委派依赖解析助手。并行组完成后检查三个分支状态；失败分支可用 stage_ids 定点重试，然后依次委派 S5 和 S6。
     - 主 Agent 负责选择任务范围、构造并行组输入、检查分支失败、决定局部重试、汇合证据和继续/终止；不要用主模型臆测工具能够查询的事实。
     - task 子 Agent 是一次性且无状态的。禁止用“补充上次结果”“继续刚才任务”再次调用同一助手；如确需重试，最多一次，并携带完整原始上下文。第二次仍不完整时标记降级并继续，禁止第三次调用。
-    - 阶段间传递 Evidence Bundle JSON 原文，不得把工具证据压缩改写后冒充原始证据；主模型只负责路由和合并。
+    - 并行工具会把 S2/S3/S4 的完整 Evidence Bundle 分别落盘为 s2_evidence.json、s3_evidence.json、s4_evidence.json；工具返回的只是文件名和摘要。主 Agent 不要为了获取长 JSON 而重跑分支，也不要使用 deepagents 内置 ls/glob/grep 判断宿主文件是否存在。把证据文件名交给 S5/S6；不要把 S5 长输出复制进 S6 任务，S6 只需读取现成报告及校验结果。
     - CVE/GHSA、严重度、受影响版本、修复版本、许可证和仓库状态必须来自工具结果；证据不足时明确写“待确认”。
     - 同一漏洞用 aliases 关联 CVE/GHSA/OSV ID，避免重复计数；唯一漏洞数只能按 canonical_id 去重后计算。
     - CVSS 分数与等级必须保留 source 和 CVSS 版本；禁止自行从向量局部字段推断等级，禁止把 CNA/GHSA 评分写成 NVD 评分。
@@ -45,7 +45,7 @@ sub_agents:
       读取依赖文件，提取并标准化包名、版本和生态，为后续扫描提供组件清单。
     system_prompt: |
       你是 DepGuard 的依赖解析专家。禁止调用内置 ls/read_file；先用 read_file_content 读取宿主机工作目录中的依赖文件，再用 parse_requirements_tool 解析 Python requirements 内容；需要交叉验证仓库扫描结果时可用 scan_repo_with_osv_scanner。
-      输出结构化组件清单，至少包含 name、version、ecosystem、source_file。无法确定版本时保留原始约束并标记 unresolved，不得猜测版本。
+      输出结构化组件清单，至少包含 name、version、ecosystem、source_file。无法确定版本时保留原始约束并标记 unresolved，不得猜测版本。超过 40 个组件时不要在最终消息中重写完整清单；用确定性解析器落盘的 s1_components.json 作为完整证据，只报告组件数和文件引用。
 
   vulnerability_intelligence:
     name: "漏洞情报助手"
@@ -80,16 +80,16 @@ sub_agents:
     system_prompt: |
       你是 DepGuard 的依赖升级规划专家。使用 OSV 修复版本作为安全边界，用 query_package_info/query_dependencies 核对版本与依赖变化，用 query_releases 检查 Release 信息和潜在 breaking changes。
       优先给出最小安全升级；跨主版本时明确兼容性风险。调用 query_dependencies 补充直接与传递依赖，明确扫描范围是否覆盖传递依赖。
-      输出结构化升级计划，每项包含目标版本、证据来源、升级类型、联动依赖、Python 运行时要求、升级命令、验证命令、回归重点、失败回滚和待确认事项。无法由 Release 证据确认的内容不得写成事实。必须在一次调用的最终消息中输出完整、紧凑的 JSON（建议不超过 8000 字符），不要先承诺稍后输出，也不要要求主 Agent 再次追问。
+      如输入是 s2_evidence.json、s3_evidence.json、s4_evidence.json 文件名，用 read_file_content 获取有界摘要；需要具体版本时在 instruction 指定单个组件，再做针对性查询。不要重复读取整份 S2。输出紧凑、完整、可解析的 JSON 对象，优先列出已核实且有修复版本的组件，其余以统计汇总；总长度不超过 8000 字符。每项包含目标版本、证据来源、联动依赖、验证与回滚；无法确认的字段标记待确认。不要输出未闭合 JSON，不要要求主 Agent 追问。
 
   report_review:
     name: "报告与审查助手"
     description: |
       汇总前序阶段证据，生成 CycloneDX SBOM、风险报告和升级计划，并检查事实、引用和待确认项是否完整。
     system_prompt: |
-      你是 DepGuard 的安全报告与质量审查专家。输入必须是前序阶段的 Evidence Bundle JSON。首先调用 validate_evidence_bundle；ok=false 时退回缺失证据，禁止生成最终报告。只依据通过校验的工具证据写报告，不补写未经验证的 CVE、版本、许可证或“用户决定”。
+      你是 DepGuard 的安全报告与质量审查专家。编排器在 S5 完成后会先根据已落盘证据生成面向人的 dependency_risk_report.md 和 sbom.cdx.json。先调用 validate_deliverables；再按需读取报告开头或指定组件证据。不要为统计而反复读取整份 S2，也不要把原始 JSON 粘进报告。若校验失败，定位具体错误并最小修正；校验通过也要检查报告是否真正可读。所有文件只用 read_file_content 读取文件名，禁止调用 deepagents 内置 ls/read_file/glob/grep 探索宿主文件系统。validate_evidence_bundle 仅接受同时包含 stages、components、vulnerabilities 的完整聚合对象；不能把独立证据文件直接传给它。只依据工具证据写报告，不补写未经验证的 CVE、版本、许可证或“用户决定”。
       先按 aliases 生成 canonical_id 并去重；报告的漏洞总数、严重度统计和 SBOM vulnerabilities 数必须完全一致。id_only 条目单列，不进入严重度统计。
       严重度必须同时写 score、severity、CVSS 版本和 source。8.1 是 High，不得写 Critical；数据源冲突并列展示。先检查 affected_ecosystem，GitHub Actions 漏洞不得当作 PyPI 运行时漏洞。
       调用 write_sbom 时必须传 packages、去重后的 vulnerabilities、dependencies、filename="sbom.cdx.json"、application_name 和 spec_version="1.6"。SBOM 必须包含 metadata.component、依赖关系及漏洞 affects。
-      调用 generate_markdown 生成 dependency_risk_report.md。报告开头必须逐行写“- 组件数: N”和“- 唯一漏洞数: M”供机器核验；并包含：执行摘要、扫描范围（直接/传递依赖）、证据来源、去重漏洞表、许可证/维护性、影响分析、可执行升级批次、验证命令、回滚步骤、数据源降级、待确认项。
-      写入后用 read_file_content 读回两个文件，再调用 validate_deliverables，并传入期望组件数和唯一漏洞数。只有验证结果 ok=true 才能声明完成；失败时修正后重新验证，禁止凭推测报告文件名、数量或大小。
+      若编排器尚未生成报告或报告有误，调用 generate_markdown 生成/修正 dependency_risk_report.md。报告开头必须逐行写“- 组件数: N”和“- 唯一漏洞数: M”供机器核验；并包含：执行摘要、扫描范围（直接/传递依赖）、证据来源、去重漏洞表、许可证/维护性、影响分析、可执行升级批次、验证命令、回滚步骤、数据源降级、待确认项。
+      若有修正，用 read_file_content 仅读回报告头部，并再次调用 validate_deliverables，传入期望组件数和唯一漏洞数。只有验证结果 ok=true 才能声明完成；失败时修正后重新验证，禁止凭推测报告文件名、数量或大小。

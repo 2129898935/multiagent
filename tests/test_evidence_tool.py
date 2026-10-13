@@ -54,3 +54,9 @@ def test_id_only_not_treated_as_detailed():
     assert result["ok"] is True
     assert result["detailed_vulnerability_count"] == 0
     assert result["id_only_count"] == 1
+
+
+def test_confirmed_status_from_s2_is_valid():
+    bundle = _bundle()
+    bundle["vulnerabilities"][0]["evidence_status"] = "confirmed"
+    assert validate_evidence_bundle_data(bundle)["ok"] is True

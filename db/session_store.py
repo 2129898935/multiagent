@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id TEXT NOT NULL,
     title TEXT,
     repo_url TEXT,
-    status TEXT DEFAULT 'pending',   -- pending/running/done/failed
+    status TEXT DEFAULT 'pending',   -- pending/running/done/failed/cancelled
     created_at TEXT,
     finished_at TEXT,
     error TEXT,
@@ -47,10 +47,10 @@ def create_session(thread_id: str, user_id: str, repo_url: str | None = None, ti
 
 
 def update_session_status(thread_id: str, status: str, error: str | None = None) -> None:
-    """更新会话状态（running/done/failed），完成时写 finished_at。"""
+    """更新会话状态（running/done/failed/cancelled），完成时写 finished_at。"""
     conn = _conn()
     try:
-        finished = datetime.now().isoformat() if status in ("done", "failed") else None
+        finished = datetime.now().isoformat() if status in ("done", "failed", "cancelled") else None
         conn.execute(
             "UPDATE sessions SET status=?, error=?, finished_at=COALESCE(?, finished_at) WHERE id=?",
             (status, error, finished, thread_id),

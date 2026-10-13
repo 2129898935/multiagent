@@ -19,17 +19,19 @@ import uuid
 import shutil
 from pathlib import Path
 import re
+import json
 
 from api.context import set_session_context, reset_session_context, set_thread_context
 
 from agent.loop_guard import ProgressDetector
-from agent.planner import PlanTracker, default_scan_plan, subagent_to_step_id, tool_to_step_id
+from agent.planner import PlanTracker, default_scan_plan
 from utils.context_budget import truncate_text
 from db.session_store import update_session_status
 from memory.retrieve import retrieve_memories
 from memory.extract import extract_memories
 from memory.store import add_memory
 from tools.sbom_tool import validate_deliverables
+from agent.scan_guard import ScanExecution, requires_full_scan, scan_completion_errors, prepare_requirements_evidence, is_requirements_file, build_deliverables_from_evidence
 
 from langchain_core.messages import AIMessage
 
@@ -133,9 +135,11 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     # 处理上传文件 （updated / session_session_id）
     updated_dir_path = project_root_path / "updated" / f"session_{session_id}"
     updated_info_prompt = ""  # 有上传文件，拼接上传文件专属解析位置的提示词
+    uploaded_files: list[str] = []
     if updated_dir_path.exists():
         # 有
         files = [f.name for f in updated_dir_path.iterdir() if f.is_file()]
+        uploaded_files = files
         # 将上传文件统一赋值到 output_dir 方便前端统一读取 session_dir
         if files:
             for filename in files:
@@ -172,7 +176,15 @@ async def run_deep_agent(task_query, session_id, user_id=None):
     4. 禁止使用 deepagents 内置的 ls/read_file 读取上传文件：它们是虚拟文件系统，看不到宿主机会话目录。
     5. 使用相对路径，禁止使用绝对路径
     6. 扫描 DAG 固定依赖为：S1 → [S2、S3、S4 并行] → S5 → S6。S1 后必须调用 parallel_dependency_analysis，一次同时启动三个分支；汇合成功后才能进入 S5。
+    7. parallel_dependency_analysis 返回的是证据文件索引。分支 status=completed 即已落盘；不要因摘要短而重跑。S5/S6 读取 s1_components.json、s2_evidence.json、s3_evidence.json、s4_evidence.json，禁止使用内置 ls/glob/grep。
     """
+    if any(is_requirements_file(name) for name in uploaded_files):
+        path_instruction += (
+            "\n    系统会将 requirements 文件确定性解析为 s1_components.json；"
+            "这份文件是完整的 S1 Evidence。不要重复委派 S1 或手写组件清单。"
+            "下一步直接调用 parallel_dependency_analysis，component_evidence 传 @s1_components.json；"
+            "并行工具会从会话目录读取完整原文。\n"
+        )
     # M3: 召回用户长期记忆，注入用户消息（跨会话记忆）
     memory_prompt = await asyncio.to_thread(retrieve_memories, user_id, task_query) if user_id else ""
 
@@ -182,130 +194,134 @@ async def run_deep_agent(task_query, session_id, user_id=None):
         max_tokens=8000,
     )
 
-    # M7: 死循环防护——进度检测器，识别「同工具同参数重复」的假推进
+    # The model proposes actions; actual tool responses and deliverables decide completion.
     detector = ProgressDetector()
-
-    # M4: 结构化计划——追踪扫描进度（解析→查漏洞→查许可证→可达性→报告）
     plan_tracker = PlanTracker(default_scan_plan())
-    running_subagent_steps: set[str] = set()
+    scan_execution = ScanExecution(plan_tracker)
+    scan_required = requires_full_scan(task_query, uploaded_files)
     seen_usage_messages: set[str] = set()
     subagent_call_counts: dict[str, int] = {}
     token_usage = 0
+    deliverables_prepared = False
 
-    # 反馈结果
     try:
-        # 复用单例 Agent（整个进程只构建一次，会话隔离靠 thread_id）
+        prepared_s1 = prepare_requirements_evidence(session_dir, uploaded_files)
+        if prepared_s1:
+            plan_tracker.mark("S1", "done")
+            scan_execution.prevalidated_steps.add("S1")
+            monitor._emit("agent_status", f"S1 确定性解析完成：{prepared_s1['total_components']} 个组件", {
+                "stage_id": "S1", "status": "completed",
+                "component_count": prepared_s1["total_components"],
+            })
         main_agent = await get_agent()
-        update_session_status(session_id, "running")  # M1: 会话状态 → running
+        update_session_status(session_id, "running")
+        final_result = ""
+        next_message = user_content
 
-        final_result = ""  # 最终回答内容，供 M3 记忆提炼使用
-
-        # 执行
-        async for chunk in main_agent.astream({
-            "messages": [
-                {
-                    "role": "user", "content": user_content
-                }
-            ]
-        }, config=config):
-            # {"model [大模型决定调用工具 子智能体  最终结果] / tools" : {messages:[xxx...]}}
-            for node_name, state in chunk.items():
-                if not state or "messages" not in state:
-                    continue
-                messages = state["messages"]
-                if messages and isinstance(messages, list):
+        # A premature final answer gets one bounded chance to resume the same checkpoint.
+        for attempt in range(2 if scan_required else 1):
+            final_result = ""
+            async for chunk in main_agent.astream({
+                "messages": [{"role": "user", "content": next_message}]
+            }, config=config):
+                for node_name, state in chunk.items():
+                    if not state or not isinstance(state.get("messages"), list):
+                        continue
+                    messages = state["messages"]
+                    for message in messages:
+                        if getattr(message, "tool_call_id", None):
+                            scan_execution.record_result(message)
+                            if (scan_required and not deliverables_prepared
+                                    and plan_tracker._by_id["S5"].status == "done"):
+                                deliverables_prepared = build_deliverables_from_evidence(session_dir)
+                                if deliverables_prepared:
+                                    monitor._emit("report_prepared", "已从证据生成报告与 SBOM，等待 S6 审查")
+                    if node_name != "model" or not messages:
+                        continue
                     last_msg = messages[-1]
-                    if node_name == 'model':
-                        # 主模型重新获得控制权，说明上一批子 Agent 已经返回。
-                        for completed_step in running_subagent_steps:
-                            plan_tracker.mark(completed_step, "done")
-                        running_subagent_steps.clear()
+                    usage = getattr(last_msg, "usage_metadata", None) or {}
+                    message_key = str(getattr(last_msg, "id", "") or id(last_msg))
+                    if message_key not in seen_usage_messages:
+                        token_usage += int(usage.get("total_tokens", 0) or 0)
+                        seen_usage_messages.add(message_key)
 
-                        usage = getattr(last_msg, "usage_metadata", None) or {}
-                        message_key = str(getattr(last_msg, "id", "") or id(last_msg))
-                        if message_key not in seen_usage_messages:
-                            token_usage += int(usage.get("total_tokens", 0) or 0)
-                            seen_usage_messages.add(message_key)
-
-                        if last_msg.tool_calls:
-                            # 工具和子智能体
-                            for tool_call in last_msg.tool_calls:
-                                """
-                                  tool_call = {
-                                      name: task
-                                      args:{
-                                          subagent_type:子智能体的名字
-                                          description:子智能体的描述
-                                      }
-                                  }
-                                """
-                                if tool_call['name'] == 'task':
-                                    # 调用某个子智能体
-                                    subagent_type = tool_call['args']['subagent_type']
-                                    subagent_call_counts[subagent_type] = subagent_call_counts.get(subagent_type, 0) + 1
-                                    if subagent_call_counts[subagent_type] > 2:
-                                        raise RuntimeError(
-                                            f"阶段子 Agent 重复调用超过上限: {subagent_type}；"
-                                            "首次执行加一次局部重试后仍未收敛"
-                                        )
-                                    monitor.report_assistant(
-                                        subagent_type,
-                                        {'description': tool_call['args']['description']}
+                    tool_calls = getattr(last_msg, "tool_calls", None) or []
+                    if tool_calls:
+                        for tool_call in tool_calls:
+                            scan_execution.record_call(tool_call)
+                            name = tool_call.get("name", "")
+                            args = tool_call.get("args") or {}
+                            if name == "task":
+                                subagent_type = args.get("subagent_type", "")
+                                subagent_call_counts[subagent_type] = subagent_call_counts.get(subagent_type, 0) + 1
+                                if subagent_call_counts[subagent_type] > 2:
+                                    raise RuntimeError(
+                                        f"阶段子 Agent 重复调用超过上限: {subagent_type}；"
+                                        "首次执行加一次局部重试后仍未收敛"
                                     )
-                                    step_id = subagent_to_step_id(subagent_type)
-                                    if step_id:
-                                        plan_tracker.mark(step_id, "running")
-                                        running_subagent_steps.add(step_id)
-                                else:
-                                    # M4: 根据工具调用更新计划步骤进度
-                                    step_id = tool_to_step_id(tool_call['name'])
-                                    if step_id:
-                                        plan_tracker.mark(step_id, "done")
-                                    # M7: 观察工具调用，检测假推进/死循环（只按「同工具同参数」判定）
-                                    detector.observe(tool_call['name'], tool_call.get('args', {}))
-                                    if detector.is_stuck():
-                                        monitor._emit("error", "检测到任务可能陷入无进展循环（重复调用同一工具）")
-                        elif last_msg.content:
-                            # 最终结果
-                            print(f"主智能体执行结果，最终结果：{last_msg.content[:100]}")
-                            monitor.report_task_result(last_msg.content)
-                            final_result = last_msg.content
+                                monitor.report_assistant(subagent_type, {"description": args.get("description", "")})
+                            detector.observe(name, args)
+                            if detector.is_stuck():
+                                monitor._emit("error", "检测到任务可能陷入无进展循环（重复调用同一工具）")
+                    elif last_msg.content:
+                        final_result = str(last_msg.content)
 
-        # M3: 任务结束后提炼长期记忆（跨会话有价值的信息）
-        if user_id and final_result:
-            for m in await extract_memories(task_query, model):
-                await asyncio.to_thread(add_memory, user_id, m["type"], m["content"])
+            if not scan_required:
+                break
+            errors = scan_completion_errors(plan_tracker, session_dir, uploaded_files)
+            errors.extend(scan_execution.order_errors)
+            if not errors:
+                break
+            if attempt == 1:
+                raise RuntimeError("扫描未完成，不能标记 done：" + "；".join(errors))
+            monitor._emit("scan_recovery", "扫描尚未完成，主 Agent 继续执行", {
+                "errors": errors,
+                "stage_status": plan_tracker.summary(),
+            })
+            next_message = (
+                "上一轮未完成真实依赖扫描。请继续执行，禁止直接给最终回答。"
+                "先检查下列未完成项，严格依次完成 S1 → [S2/S3/S4 并行] → S5 → S6。"
+                "若已有 s1_components.json，S1 已由系统完成，不要重新委派；否则调用依赖解析助手。"
+                "S2/S3/S4 必须调用 parallel_dependency_analysis，传入 @s1_components.json（若存在）；"
+                "S5/S6 必须分别调用对应助手；最后实际写入并校验 dependency_risk_report.md 和 sbom.cdx.json。"
+                "若无法完成，明确报告失败，不得声称扫描完成。\n"
+                "原始请求：" + task_query + "\n"
+                "当前进度：\n" + plan_tracker.summary() + "\n"
+                "未完成原因：" + "；".join(errors)
+            )
 
-        # 流结束时，最后一批子 Agent 已返回但可能没有下一轮 model chunk。
-        for completed_step in running_subagent_steps:
-            plan_tracker.mark(completed_step, "done")
-        running_subagent_steps.clear()
-
-        finding_count = len(set(re.findall(
-            r"\b(?:CVE-\d{4}-\d+|GHSA-[0-9a-z-]+)\b",
-            final_result,
-            re.IGNORECASE,
-        )))
-        from db.session_store import update_session_metrics
-        update_session_metrics(session_id, token_usage=token_usage, finding_count=finding_count)
-
-        # 交付门禁：只要生成了扫描报告或 SBOM，就必须存在标准文件且机器校验通过。
-        report_path = session_dir / "dependency_risk_report.md"
-        sbom_path = session_dir / "sbom.cdx.json"
-        legacy_sbom_path = session_dir / "sbom.json"
-        if report_path.exists() or sbom_path.exists() or legacy_sbom_path.exists():
-            gate = json.loads(validate_deliverables.func(
-                report_filename=report_path.name,
-                sbom_filename=sbom_path.name,
-            ))
+        # Even non-scan tasks that created deliverables must pass the file gate.
+        if not scan_required and any((session_dir / name).exists() for name in
+                                     ("dependency_risk_report.md", "sbom.cdx.json", "sbom.json")):
+            gate = json.loads(validate_deliverables.func())
             if not gate.get("ok"):
                 raise RuntimeError("交付物校验失败：" + "；".join(gate.get("errors", [])))
 
-        # M4: 报告计划执行进度
+        if not final_result:
+            raise RuntimeError("主 Agent 没有返回最终结果")
+        from db.session_store import update_session_metrics
+        if scan_required:
+            sbom = json.loads((session_dir / "sbom.cdx.json").read_text(encoding="utf-8"))
+            finding_count = len(sbom.get("vulnerabilities", []))
+        else:
+            finding_count = len(set(re.findall(
+                r"\b(?:CVE-\d{4}-\d+|GHSA-[0-9a-z-]+)\b", final_result, re.IGNORECASE,
+            )))
+        update_session_metrics(session_id, token_usage=token_usage, finding_count=finding_count)
         print(f"[Plan] 六阶段计划进度 ({plan_tracker.done_count()}/{len(plan_tracker.plan.steps)}):\n{plan_tracker.summary()}")
+        if user_id:
+            try:
+                for memory in await extract_memories(task_query, model):
+                    await asyncio.to_thread(add_memory, user_id, memory["type"], memory["content"])
+            except Exception as exc:
+                monitor._emit("warning", f"长期记忆提炼失败：{exc}")
+        update_session_status(session_id, "done")
+        monitor.report_task_result(final_result)
 
-        update_session_status(session_id, "done")  # M1: 会话状态 → done
-
+    except asyncio.CancelledError:
+        monitor._emit("cancelled", "任务已取消")
+        update_session_status(session_id, "cancelled", "用户或服务取消任务")
+        raise
     except Exception as e:
         # 报错推送错误信息给前端
         monitor._emit("error", f"执行主智能发生异常信息：{str(e)}")

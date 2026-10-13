@@ -1,4 +1,7 @@
 import logging
+import json
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -6,6 +9,74 @@ from langchain_core.tools import tool
 from api.monitor import monitor
 from api.context import get_session_context
 from utils.path_utils import resolve_path
+from agent.report_builder import deduplicate_vulnerabilities
+
+
+def _bounded_text(content: str, instruction: str) -> str:
+    """Respect head requests and keep large files out of the model context."""
+    match = re.search(r"(?:前|头部|开头)\s*(\d{1,4})\s*行", instruction)
+    if match or any(word in instruction for word in ("头部", "开头")):
+        limit = min(int(match.group(1)) if match else 60, 200)
+        lines = content.splitlines()
+        return "\n".join(lines[:limit]) + (f"\n[仅返回前 {limit}/{len(lines)} 行]" if len(lines) > limit else "")
+    if len(content) > 24000:
+        return content[:22000] + f"\n[文件共 {len(content)} 字符，已截断；请指定组件或读取头部，不要反复读取整文件]"
+    return content
+
+
+def _summarize_json(filename: str, content: str, instruction: str) -> str:
+    """Provide bounded, deterministic views of large evidence bundles."""
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return _bounded_text(content, instruction)
+    if not isinstance(data, dict):
+        return _bounded_text(content, instruction)
+    if filename == "s2_evidence.json":
+        raw_vulns = data.get("vulnerabilities") or []
+        vulns = deduplicate_vulnerabilities(raw_vulns)
+        components = data.get("components") or []
+        names = {str(item.get("name", "")).lower() for item in components if isinstance(item, dict)}
+        selected = sorted(name for name in names
+                          if name and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])",
+                                                instruction, re.I))
+        counts = Counter(str(item.get("affected_component") or "unknown") for item in vulns)
+        summary = {"stage": "S2", "source_status": data.get("source_status"),
+                   "components": len(components), "raw_records": len(raw_vulns),
+                   "unique_vulnerabilities": len(vulns),
+                   "id_only": sum(item.get("evidence_status") == "id_only" for item in vulns),
+                   "by_component": dict(counts.most_common(30))}
+        if selected:
+            matches = [item for item in vulns
+                       if str(item.get("affected_component") or "").lower() in selected]
+            summary["selected_components"] = selected
+            summary["selected_total"] = len(matches)
+            summary["selected_vulnerabilities"] = [
+                {key: item.get(key) for key in ("canonical_id", "aliases", "affected_component",
+                 "affected_version", "ratings", "fixed_versions", "evidence_status")}
+                for item in matches[:50]
+            ]
+            if len(matches) > 50:
+                summary["notice"] = "仅返回前 50 条；请缩小到单个组件"
+        else:
+            summary["notice"] = "大文件不返回全部原文；请在 instruction 中指定组件名。完整证据仍保存在文件中。"
+        return _bounded_text(json.dumps(summary, ensure_ascii=False, separators=(",", ":")), instruction)
+    if filename == "s3_evidence.json":
+        rows = data.get("components") or []
+        licenses = Counter(str(value) for row in rows for value in row.get("licenses") or [])
+        result = {"stage": "S3", "source_status": data.get("source_status"),
+                  "components": len(rows), "licenses": dict(licenses.most_common(20)),
+                  "unknown_license": sum(not row.get("licenses") for row in rows),
+                  "unknown_repository_status": sum(
+                      str(row.get("repository_status") or "unknown").lower() == "unknown"
+                      for row in rows)}
+        return json.dumps(result, ensure_ascii=False)
+    if filename == "sbom.cdx.json":
+        result = {key: data.get(key) for key in ("bomFormat", "specVersion", "metadata")}
+        result["components"] = len(data.get("components") or [])
+        result["vulnerabilities"] = len(data.get("vulnerabilities") or [])
+        return _bounded_text(json.dumps(result, ensure_ascii=False), instruction)
+    return _bounded_text(content, instruction)
 
 # 尝试导入可选依赖，实现按需加载
 try:
@@ -58,7 +129,7 @@ def read_file_content(
     try:
         if ext in ['.md', '.txt']:
             # Path直接读取文本（替代open + os.path）
-            return file_path.read_text(encoding='utf-8')
+            return _bounded_text(file_path.read_text(encoding='utf-8'), instruction)
 
         elif ext == '.docx':
             if docx is None:
@@ -94,10 +165,13 @@ def read_file_content(
             ]
             return "\n".join(result)
 
+        elif ext == '.json':
+            return _summarize_json(file_path.name, file_path.read_text(encoding='utf-8'), instruction)
+
         else:
             # 尝试作为纯文本读取
             try:
-                return file_path.read_text(encoding='utf-8')
+                return _bounded_text(file_path.read_text(encoding='utf-8'), instruction)
             except UnicodeDecodeError:
                 return f"错误：不支持的文件格式 '{ext}'，且无法作为文本读取。"
 

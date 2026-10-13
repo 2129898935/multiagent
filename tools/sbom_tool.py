@@ -220,6 +220,18 @@ def validate_deliverables(
         errors.append(f"报告不存在或为空：{report_path.name}")
     else:
         report_text = report_path.read_text(encoding="utf-8")
+        required_sections = (
+            "## 执行摘要", "## 范围、方法与证据来源", "## 重点组件与处置顺序",
+            "## 许可证与维护性", "## 源码影响分析", "## 升级、验证与回滚",
+            "## 待确认项", "## 漏洞明细",
+        )
+        for section in required_sections:
+            if section not in report_text:
+                errors.append(f"报告缺少面向人的必需章节：{section}")
+        if len(re.findall(r'(?m)^\s*"(?:stage|source_status|components|package_results)"\s*:', report_text)) > 3:
+            errors.append("报告包含大段原始 JSON，未转换为可读摘要")
+        if report_text.count("```") % 2:
+            errors.append("报告包含未闭合的代码块，内容可能截断")
     if not sbom_path.is_file() or sbom_path.stat().st_size == 0:
         errors.append(f"SBOM 不存在或为空：{sbom_path.name}")
         data = {}
@@ -227,6 +239,10 @@ def validate_deliverables(
         try:
             data = json.loads(sbom_path.read_text(encoding="utf-8"))
             errors.extend(validate_sbom_data(data, expected_components, expected_vulnerabilities))
+            missing_ids = [str(item.get("id")) for item in data.get("vulnerabilities", [])
+                           if item.get("id") and str(item["id"]) not in report_text]
+            if missing_ids:
+                errors.append(f"报告漏洞明细缺少 {len(missing_ids)} 个 SBOM ID")
             declared_components = re.search(r"(?m)^- 组件数[：:]\s*(\d+)\s*$", report_text)
             declared_vulnerabilities = re.search(r"(?m)^- 唯一漏洞数[：:]\s*(\d+)\s*$", report_text)
             if not declared_components or not declared_vulnerabilities:
